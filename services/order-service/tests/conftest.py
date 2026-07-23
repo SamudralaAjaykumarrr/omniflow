@@ -11,15 +11,27 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 from app.db import Base, get_db, get_engine  # noqa: E402
 from app.main import app  # noqa: E402
+from app.models import ProcessedEvent  # noqa: E402,F401 (registers table with Base.metadata)
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _schema():
+    """Schema is owned by Alembic migrations — entrypoint.sh runs `alembic
+    upgrade head` before pytest ever starts. `create_all` here only backfills
+    tables for the rare case pytest runs outside that entrypoint (a no-op
+    otherwise). Deliberately never `drop_all`: that wipes tables while
+    leaving Alembic's own `alembic_version` bookkeeping in place, which
+    desyncs the two the next time a new migration is added — a real bug
+    hit during Phase 2 (see DECISIONS.md). Truncating (not dropping) at
+    session start instead guards against leftover rows from a stale prior
+    run without touching table structure or migration state.
+    """
     engine = get_engine()
-    Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            conn.execute(table.delete())
     yield
-    Base.metadata.drop_all(engine)
 
 
 @pytest.fixture(autouse=True)

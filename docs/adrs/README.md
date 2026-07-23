@@ -11,6 +11,7 @@
 | [0007](0007-terraform-not-applied.md) | AWS infrastructure: Terraform authored and validated, never applied |
 | [0008](0008-monorepo-layout.md) | Monorepo layout and service boundaries |
 | [0009](0009-authn-authz.md) | Authentication and authorization: JWT + RBAC |
+| [0010](0010-node-scoring-and-saga-orchestration.md) | Node-scoring formula; saga coordination via direct REST, fan-out via Kafka |
 
 New ADRs are numbered sequentially and never renumbered or deleted; a
 superseded decision gets a new ADR that says so and links back.

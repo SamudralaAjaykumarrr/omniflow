@@ -11,8 +11,15 @@ from app.schemas import (
     CreateOrderRequest,
     OrderResponse,
     OrderStatusHistoryOut,
+    TransitionOrderRequest,
 )
-from app.service import cancel_order, create_order, get_order, list_status_history
+from app.service import (
+    cancel_order,
+    create_order,
+    get_order,
+    list_status_history,
+    transition_order_status,
+)
 from app.state_machine import InvalidTransitionError
 
 router = APIRouter()
@@ -72,4 +79,23 @@ def cancel_order_route(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ConcurrentUpdateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return OrderResponse.model_validate(order)
+
+
+@router.post("/orders/{order_id}/transition", response_model=OrderResponse)
+def transition_order_route(
+    order_id: uuid.UUID, request: TransitionOrderRequest, db: Session = Depends(get_db)
+):
+    """Internal endpoint for the Fulfillment Orchestrator — not proxied by
+    the API Gateway to customers."""
+    try:
+        order = transition_order_status(db, order_id, request)
+    except OrderNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidTransitionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ConcurrentUpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return OrderResponse.model_validate(order)

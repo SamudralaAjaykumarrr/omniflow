@@ -12,6 +12,7 @@ from app.models import (  # noqa: F401  (import registers models with Base.metad
     OrderItem,
     OrderStatusHistory,
     OutboxEvent,
+    ProcessedEvent,
 )
 
 config = context.config

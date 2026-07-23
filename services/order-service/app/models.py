@@ -119,3 +119,18 @@ class OutboxEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ProcessedEvent(Base):
+    """Idempotent-consumer ledger (docs/event-catalog.md, docs/data-model.md)
+    — composite PK makes redelivery of an already-applied event a no-op
+    insert-conflict rather than a re-applied side effect."""
+
+    __tablename__ = "processed_events"
+
+    consumer_name: Mapped[str] = mapped_column(String(100), primary_key=True)
+    event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    processed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

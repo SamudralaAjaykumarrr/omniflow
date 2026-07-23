@@ -63,6 +63,18 @@ class CancelOrderRequest(BaseModel):
     expected_version: int = Field(gt=0)
 
 
+class TransitionOrderRequest(BaseModel):
+    """Internal endpoint used by the Fulfillment Orchestrator to drive an
+    order through the saga's states — not exposed to customers via the
+    gateway. `node_id` is only meaningful (and required) when transitioning
+    to FULFILLMENT_ASSIGNED; ignored otherwise."""
+
+    to_status: str
+    expected_version: int = Field(gt=0)
+    reason: str = Field(min_length=1, max_length=500)
+    node_id: uuid.UUID | None = None
+
+
 class ErrorResponse(BaseModel):
     error_code: str
     message: str

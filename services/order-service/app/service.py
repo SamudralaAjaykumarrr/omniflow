@@ -10,7 +10,12 @@ from app.config import get_settings
 from app.exceptions import ConcurrentUpdateError, IdempotencyKeyConflictError, OrderNotFoundError
 from app.models import Customer, IdempotencyKey, Order, OrderItem, OrderStatusHistory
 from app.outbox import stage_event
-from app.schemas import CancelOrderRequest, CreateOrderRequest, OrderResponse
+from app.schemas import (
+    CancelOrderRequest,
+    CreateOrderRequest,
+    OrderResponse,
+    TransitionOrderRequest,
+)
 from app.state_machine import CANCELLABLE_STATES, OrderStatus, assert_valid_transition
 from event_contracts import EventType
 
@@ -151,6 +156,53 @@ def cancel_order(db: Session, order_id: uuid.UUID, request: CancelOrderRequest) 
             "reason": request.reason,
             "previous_state": current_status.value,
         },
+    )
+    db.commit()
+    db.refresh(order)
+    return order
+
+
+def transition_order_status(
+    db: Session, order_id: uuid.UUID, request: TransitionOrderRequest
+) -> Order:
+    """Internal endpoint the Fulfillment Orchestrator calls to drive an order
+    through the saga's states. Optimistic-concurrency-checked like
+    `cancel_order`; unlike order.created/order.validated/order.cancelled,
+    none of these intermediate transitions stage an outbox event here — the
+    orchestrator is the documented producer of fulfillment.assigned,
+    order.shipped, and order.failed (docs/event-catalog.md), so it stages
+    its own events after this call succeeds.
+    """
+    order = db.get(Order, order_id)
+    if order is None:
+        raise OrderNotFoundError(str(order_id))
+
+    current_status = OrderStatus(order.status)
+    target_status = OrderStatus(request.to_status)
+    assert_valid_transition(current_status, target_status)
+
+    values: dict = {"status": target_status.value, "version": Order.version + 1}
+    if target_status == OrderStatus.FULFILLMENT_ASSIGNED:
+        if request.node_id is None:
+            raise ValueError("node_id is required when transitioning to FULFILLMENT_ASSIGNED")
+        values["assigned_node_id"] = request.node_id
+
+    result = db.execute(
+        update(Order)
+        .where(Order.id == order_id, Order.version == request.expected_version)
+        .values(**values)
+    )
+    if result.rowcount == 0:
+        db.rollback()
+        raise ConcurrentUpdateError(str(order_id), request.expected_version)
+
+    db.add(
+        OrderStatusHistory(
+            order_id=order_id,
+            from_status=current_status.value,
+            to_status=target_status.value,
+            reason=request.reason,
+        )
     )
     db.commit()
     db.refresh(order)

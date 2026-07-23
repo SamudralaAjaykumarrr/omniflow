@@ -20,7 +20,7 @@ C4Container
     Container(orders, "Order Service", "FastAPI + SQLAlchemy", "Order state machine, idempotency, outbox")
     Container(inventory, "Inventory Service", "FastAPI + SQLAlchemy", "Stock, reservations, row-level locking")
     Container(orchestrator, "Fulfillment Orchestrator", "Python + Kafka consumer", "Saga: node selection, payment sim, compensation")
-    Container(payment_sim, "Payment Simulator", "Python", "Deterministic authorize/decline/timeout")
+    Container(payment_sim, "Payment Simulator", "Python module, in-process within the orchestrator", "Deterministic authorize/decline/timeout — not a separate deployable")
     ContainerDb(postgres, "PostgreSQL", "RDBMS", "Orders, inventory, outbox, saga state, users, audit")
     Container(redpanda, "Redpanda", "Kafka-protocol broker", "Domain event bus + DLQ topics")
     Container(outbox_relay, "Outbox Relay", "Python worker", "Polls outbox_events, publishes to Redpanda")
@@ -44,8 +44,9 @@ C4Container
   Rel(inventory, postgres, "SQL")
   Rel(orders, outbox_relay, "writes outbox_events row in same TX", "via postgres")
   Rel(outbox_relay, redpanda, "produces events")
-  Rel(orchestrator, redpanda, "consumes/produces events")
-  Rel(orchestrator, inventory, "reserve/release", "REST")
+  Rel(orchestrator, redpanda, "consumes order.validated/order.cancelled; produces its own events", "Kafka")
+  Rel(orchestrator, orders, "GET order, transition status", "REST")
+  Rel(orchestrator, inventory, "list nodes, check stock, reserve/release", "REST")
   Rel(orchestrator, payment_sim, "authorize", "in-process call")
   Rel(orchestrator, postgres, "saga_instances", "SQL")
   Rel(spark, redpanda, "consumes all topics")
@@ -64,44 +65,50 @@ C4Container
 
 ## Order sequence (happy path)
 
+As built (see ADR 0010): the orchestrator's Kafka consumption is what
+*starts* the saga (`order.validated`) and is genuinely idempotent/resumable,
+but once running, each step is a direct, synchronous REST call to Order
+Service or Inventory Service — not a second event round-trip. Every service
+still publishes its full event catalog via its own outbox for the data
+platform and dashboard; those publishes are shown but are not what drives
+the next step.
+
 ```mermaid
 sequenceDiagram
   autonumber
   participant C as Customer
   participant GW as API Gateway
   participant OS as Order Service
-  participant DB as Postgres
   participant OBX as Outbox Relay
   participant RP as Redpanda
-  participant INV as Inventory Service
   participant ORCH as Fulfillment Orchestrator
-  participant PAY as Payment Simulator
+  participant INV as Inventory Service
+  participant PAY as Payment Simulator (in-process)
 
   C->>GW: POST /orders (Idempotency-Key, correlation-id)
   GW->>OS: create order (validated payload)
-  OS->>DB: BEGIN; check idempotency_keys
   alt key seen before, same hash
-    DB-->>OS: cached response
-    OS-->>GW: 200 (original result)
+    OS-->>GW: 200 (cached response)
   else new key
-    OS->>DB: insert order (CREATED), order_items, outbox_events(order.created)
-    OS->>DB: COMMIT
-    OS-->>GW: 201 Created
-    OBX->>DB: poll unsent outbox_events
-    OBX->>RP: publish order.created (envelope: event_id, correlation_id, causation_id, v1)
-    RP-->>ORCH: order.created
-    ORCH->>OS: (via event) mark VALIDATED
-    ORCH->>RP: publish inventory.reservation.requested
-    RP-->>INV: inventory.reservation.requested
-    INV->>DB: SELECT ... FOR UPDATE on inventory_stock; reserve
-    INV->>RP: publish inventory.reserved (or inventory.rejected)
-    RP-->>ORCH: inventory.reserved
-    ORCH->>ORCH: score fulfillment nodes, select best
-    ORCH->>RP: publish fulfillment.assigned
-    ORCH->>PAY: authorize(order_total)
+    OS->>OS: BEGIN; insert order (CREATED); self-validate -> VALIDATED;<br/>outbox: order.created, order.validated; COMMIT
+    OS-->>GW: 201 Created (status: CREATED)
+    OBX->>RP: publish order.created, order.validated
+    RP-->>ORCH: order.validated (saga trigger; idempotent on event_id)
+    ORCH->>OS: GET order; transition -> INVENTORY_PENDING
+    ORCH->>INV: GET /fulfillment-nodes; POST /stock/check per candidate
+    ORCH->>RP: (via own outbox) inventory.reservation.requested
+    ORCH->>ORCH: score candidates (ADR 0010)
+    ORCH->>INV: POST /reservations (best-scored node, per item)
+    INV-->>ORCH: reserved (row-locked; ADR 0002)
+    INV->>RP: (via own outbox) inventory.reserved
+    ORCH->>OS: transition -> INVENTORY_RESERVED -> FULFILLMENT_ASSIGNED(node_id)
+    ORCH->>RP: (via own outbox) fulfillment.assigned
+    ORCH->>OS: transition -> PROCESSING
+    ORCH->>PAY: authorize_payment(order_total, skus, attempt)
     PAY-->>ORCH: approved
-    ORCH->>OS: (via event) mark PROCESSING -> SHIPPED
-    ORCH->>RP: publish order.shipped
+    ORCH->>OS: transition -> SHIPPED
+    ORCH->>RP: (via own outbox) order.shipped
+    Note over ORCH: saga_instances.status = COMPLETED
   end
 ```
 
@@ -132,57 +139,66 @@ sequenceDiagram
   autonumber
   participant ORCH as Fulfillment Orchestrator
   participant INV as Inventory Service
-  participant PAY as Payment Simulator
-  participant RP as Redpanda
+  participant PAY as Payment Simulator (in-process)
   participant OS as Order Service
+  participant RP as Redpanda
 
-  ORCH->>INV: reserve inventory
-  INV-->>ORCH: inventory.reserved
-  ORCH->>PAY: authorize(order_total)
-  PAY-->>ORCH: timeout / declined
-  ORCH->>ORCH: retry with backoff+jitter (bounded attempts)
-  alt still failing after max attempts
-    ORCH->>INV: release reservation (compensation)
-    INV-->>ORCH: inventory released, stock restored
-    ORCH->>RP: publish order.failed
-    RP-->>OS: order.failed
-    OS->>OS: transition -> FAILED
-  else recovered on retry
-    ORCH->>RP: publish fulfillment.assigned
-  end
+  ORCH->>INV: POST /reservations (best-scored node)
+  INV-->>ORCH: reserved
+  ORCH->>OS: transition -> PROCESSING
+  ORCH->>PAY: authorize_payment(attempt=1)
+  PAY-->>ORCH: PaymentGatewayTimeoutError (transient)
+  ORCH->>ORCH: sleep(base_delay * 2^0 + jitter)
+  ORCH->>PAY: authorize_payment(attempt=2)
+  PAY-->>ORCH: PaymentDeclinedError (hard decline) or retries exhausted
+  Note over ORCH: current_step = COMPENSATE_RELEASE_INVENTORY
+  ORCH->>INV: POST /reservations/{id}/release (for every reservation made)
+  INV-->>ORCH: released, stock restored
+  ORCH->>OS: transition -> FAILED
+  ORCH->>RP: (via own outbox) order.failed<br/>(failed_step, reason, compensations_applied=[inventory_release])
+  Note over ORCH: saga_instances.status = FAILED
 ```
 
+A parallel path — a customer cancelling the order while the saga is still
+`RUNNING` — is handled the same way: the orchestrator consumes
+`order.cancelled` (Order Service already moved the order to `CANCELLED`
+itself), releases whatever reservations that saga had made, and marks the
+saga `FAILED` without calling Order Service again.
+
 ## Event flow (bus-level view)
+
+As built (ADR 0010): only `order.validated` and `order.cancelled` actually
+have a consumer driving behavior (the orchestrator). Every other topic is
+real and published but exists for the data platform and dashboard, which
+land in later phases — `SPARK`/`DASH` below are therefore the intended
+consumers, not yet implemented as of Phase 2.
 
 ```mermaid
 flowchart LR
   subgraph Producers
-    OS[Order Service via Outbox Relay]
-    INV[Inventory Service]
-    ORCH[Fulfillment Orchestrator]
+    OS[Order Service - outbox relay]
+    INV[Inventory Service - outbox relay]
+    ORCH[Fulfillment Orchestrator - outbox relay]
   end
   subgraph Redpanda Topics
-    T1[order.created / order.validated]
+    T1[order.created / order.validated / order.cancelled]
     T2[inventory.reservation.requested]
     T3[inventory.reserved / inventory.rejected / inventory.low]
-    T4[fulfillment.assigned]
-    T5[order.shipped / order.cancelled / order.failed]
+    T4[fulfillment.assigned / order.shipped / order.failed]
     DLQ[deadletter.event]
   end
   subgraph Consumers
-    ORCH2[Fulfillment Orchestrator]
-    SPARK[Spark Structured Streaming]
-    DASH[Dashboard read API]
+    ORCHC[Fulfillment Orchestrator consumer<br/>order.validated, order.cancelled only]
+    SPARK[Spark Structured Streaming - Phase 4]
+    DASH[Dashboard read API - Phase 7]
   end
 
-  OS --> T1 --> ORCH2
-  ORCH2 --> T2 --> INV
-  INV --> T3 --> ORCH2
-  ORCH2 --> T4 --> SPARK
-  ORCH2 --> T5 --> SPARK
-  T1 & T2 & T3 & T4 & T5 --> SPARK
-  ORCH2 -. poison / retry-exhausted .-> DLQ
-  INV -. poison / retry-exhausted .-> DLQ
+  OS --> T1 --> ORCHC
+  ORCH --> T2
+  INV --> T3
+  ORCH --> T4
+  T1 & T2 & T3 & T4 --> SPARK
+  ORCHC -. poison / retry-exhausted .-> DLQ
   DLQ --> DASH
   SPARK --> DASH
 ```

@@ -20,9 +20,11 @@ from app.schemas import (
     ReservationResponse,
     ReserveRequest,
     SeedStockRequest,
+    StockCheckRequest,
+    StockCheckResponse,
     StockResponse,
 )
-from app.stock import create_node, get_stock, upsert_stock
+from app.stock import check_stock_sufficiency, create_node, get_stock, list_nodes, upsert_stock
 
 router = APIRouter()
 
@@ -50,6 +52,17 @@ def post_node(request: CreateNodeRequest, db: Session = Depends(get_db)):
         ),
     )
     return NodeResponse.model_validate(node)
+
+
+@router.get("/fulfillment-nodes", response_model=list[NodeResponse])
+def list_nodes_route(db: Session = Depends(get_db)):
+    return [NodeResponse.model_validate(n) for n in list_nodes(db)]
+
+
+@router.post("/stock/check", response_model=StockCheckResponse)
+def check_stock_route(request: StockCheckRequest, db: Session = Depends(get_db)):
+    sufficient, shortfalls = check_stock_sufficiency(db, request.node_id, request.items)
+    return StockCheckResponse(node_id=request.node_id, sufficient=sufficient, shortfalls=shortfalls)
 
 
 @router.post("/stock", response_model=StockResponse)

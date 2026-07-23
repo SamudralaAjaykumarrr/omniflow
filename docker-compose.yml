@@ -49,6 +49,136 @@ services:
       timeout: 5s
       retries: 10
 
+  order-validator-consumer:
+    build:
+      context: .
+      dockerfile: services/order-service/Dockerfile
+    command: ["python", "-m", "app.validator_consumer"]
+    environment:
+      ORDER_SERVICE_DATABASE_URL: ${ORDER_SERVICE_DATABASE_URL:-postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/omniflow_orders}
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda-topics:
+        condition: service_completed_successfully
+
+  order-outbox-relay:
+    build:
+      context: .
+      dockerfile: services/order-service/Dockerfile
+    command: ["python", "-m", "app.outbox_relay"]
+    environment:
+      ORDER_SERVICE_DATABASE_URL: ${ORDER_SERVICE_DATABASE_URL:-postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/omniflow_orders}
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda-topics:
+        condition: service_completed_successfully
+
+  inventory-outbox-relay:
+    build:
+      context: .
+      dockerfile: services/inventory-service/Dockerfile
+    command: ["python", "-m", "app.outbox_relay"]
+    environment:
+      INVENTORY_SERVICE_DATABASE_URL: ${INVENTORY_SERVICE_DATABASE_URL:-postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/omniflow_inventory}
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda-topics:
+        condition: service_completed_successfully
+
+  fulfillment-orchestrator:
+    build:
+      context: .
+      dockerfile: services/fulfillment-orchestrator/Dockerfile
+    environment:
+      ORCHESTRATOR_DATABASE_URL: ${ORCHESTRATOR_DATABASE_URL:-postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/omniflow_orchestrator}
+      ORCHESTRATOR_ORDER_SERVICE_URL: http://order-service:8000
+      ORCHESTRATOR_INVENTORY_SERVICE_URL: http://inventory-service:8000
+    ports:
+      - "8003:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  fulfillment-orchestrator-consumer:
+    build:
+      context: .
+      dockerfile: services/fulfillment-orchestrator/Dockerfile
+    command: ["python", "-m", "app.consumer"]
+    environment:
+      ORCHESTRATOR_DATABASE_URL: ${ORCHESTRATOR_DATABASE_URL:-postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/omniflow_orchestrator}
+      ORCHESTRATOR_ORDER_SERVICE_URL: http://order-service:8000
+      ORCHESTRATOR_INVENTORY_SERVICE_URL: http://inventory-service:8000
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda-topics:
+        condition: service_completed_successfully
+      order-service:
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+
+  fulfillment-orchestrator-outbox-relay:
+    build:
+      context: .
+      dockerfile: services/fulfillment-orchestrator/Dockerfile
+    command: ["python", "-m", "app.outbox_relay"]
+    environment:
+      ORCHESTRATOR_DATABASE_URL: ${ORCHESTRATOR_DATABASE_URL:-postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/omniflow_orchestrator}
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda-topics:
+        condition: service_completed_successfully
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.18
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=512M
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+    ports:
+      - "9092:9092"
+    volumes:
+      - omniflow_redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  redpanda-topics:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.18
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    volumes:
+      - ./infra/docker/redpanda/create-topics.sh:/usr/local/bin/create-topics.sh:ro
+    entrypoint: ["bash", "/usr/local/bin/create-topics.sh"]
+    environment:
+      REDPANDA_BROKER: redpanda:9092
+    restart: "no"
+
   api-gateway:
     build:
       context: .
@@ -64,6 +194,12 @@ services:
         condition: service_healthy
       inventory-service:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 volumes:
   omniflow_postgres_data:
+  omniflow_redpanda_data:

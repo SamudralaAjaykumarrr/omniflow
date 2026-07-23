@@ -1,6 +1,6 @@
 # Test Results
 
-Last updated: 2026-07-23 (Phase 1 complete).
+Last updated: 2026-07-24 (Phase 2 complete).
 
 This file is updated after every phase with real output from real commands;
 no number here is ever estimated or invented (see `RISKS.md` #4).
@@ -71,3 +71,99 @@ joined into one comma-separated value on receipt); and two test-isolation
 bugs in the gateway suite (a `setdefault` that a real compose-injected env
 var silently defeated, and a shared in-process rate-limit counter leaking
 state between test functions).
+
+### 2026-07-24 — Phase 2: Event platform
+
+Commands run (via `docker compose run --rm <service> pytest -q --cov=app
+--cov-report=term-missing` against each service's `*_test` database, and
+`docker run --rm ... pytest --cov=event_contracts` for the shared package):
+
+**event-contracts** — 21 passed, 0 failed, 90% coverage (181 stmts, 19
+missed — mostly `kafka.py`'s real-Kafka-client code paths, which are
+exercised for real in the compose smoke test below, not in these
+no-broker-needed unit tests).
+
+**order-service** — 34 passed, 0 failed, 91% coverage (492 stmts, 43
+missed). 13 new tests since Phase 1: the `order.created -> order.validated`
+consumer (idempotent redelivery, no-op on an order that already moved on),
+the generic `/orders/{id}/transition` endpoint (valid/invalid transitions,
+stale version, `FULFILLMENT_ASSIGNED` requiring `node_id`), and the outbox
+relay (publish, backoff-on-failure, skip-not-yet-due, skip-already-published).
+
+**inventory-service** — 16 passed, 0 failed, 93% coverage (435 stmts, 31
+missed). 7 new tests: `GET /fulfillment-nodes`, `POST /stock/check`
+(sufficient / shortfall / unknown-SKU), and the outbox relay (same 4 cases
+as order-service's).
+
+**fulfillment-orchestrator** — 27 passed, 0 failed, 65% coverage (700
+stmts, 247 missed — `clients.py`, `main.py`, `routes.py`, `schemas.py`,
+`outbox_relay.py` are exercised over real HTTP/Kafka in the compose smoke
+test, not unit tests, which use hand-written fake clients instead of
+respx-mocking two separate service URLs). Covers: node-scoring formula
+(single-candidate edge case, closer-wins, backlog-wins, determinism),
+the payment simulator (decline / persistent-timeout / recover-on-retry /
+purity), the generic backoff-with-jitter retry helper (succeeds first try,
+retries-then-succeeds, exponential+capped+jittered delays, non-retryable
+exceptions propagate immediately, exhaustion), the saga happy path
+(including node-fallback on a forced reservation-time rejection and
+partial-reservation rollback across a two-item order), saga failure paths
+(no node has stock, payment hard-decline compensation, payment
+retry-exhaustion compensation, payment retry-recovery, cancellation racing
+a running saga), idempotent redelivery of `order.validated`, and
+poison-message DLQ routing + replay.
+
+**api-gateway** — 9 passed, 0 failed, 93% coverage (unchanged from Phase 1).
+
+**Total: 107 passed, 0 failed** across the five suites (21 + 34 + 16 + 27 + 9).
+
+Lint/format: `ruff check .` — all checks passed. `ruff format --check .` —
+91 files already formatted, 0 remaining.
+
+**Real bugs found and fixed during this test pass** (full writeup in
+`DECISIONS.md`):
+- **Node-scoring divide-by-max bug**: a lone (or all-tied) candidate scored
+  its distance/delivery components as `0.0` (worst) instead of `1.0` (best,
+  trivially, as the only option) — `1 - value/max(value)` degenerates to 0
+  whenever a value equals the max, which is *always* true for a singleton
+  set. Fixed with proper min-max normalization (range `== 0` → `1.0` for
+  every candidate). Caught by
+  `test_single_candidate_scores_perfectly_on_every_relative_component`
+  before it shipped — see ADR 0010.
+- **Alembic vs. test-conftest schema management collision**: Phase 1's test
+  fixtures used `Base.metadata.drop_all`/`create_all` directly, bypassing
+  Alembic; Phase 1's entrypoint fix (in the previous phase) made
+  `alembic upgrade head` run unconditionally before every test invocation.
+  Combined, this left the `*_test` databases with an `alembic_version` row
+  claiming migration `0001` applied while the actual tables had been dropped
+  by the previous test session's teardown — so Phase 2's new migration
+  (`0002`, adding `outbox_events.next_attempt_at`) tried to `ALTER TABLE` a
+  table that didn't exist. Fixed by dropping `create_all`'s companion
+  `drop_all` from every service's test fixtures (truncate instead of drop,
+  never touching Alembic's bookkeeping) and manually repairing the
+  already-desynced test databases once.
+- Two trivial test-authoring bugs caught immediately by the first run:
+  outbox-relay tests omitted the required `correlation_id` column on a
+  hand-built `OutboxEvent` row (`NotNullViolation`), and compared a
+  publish-call's key against a plain string when `publish_envelope` encodes
+  it to `bytes` before handing it to the Kafka client.
+- `api-gateway` had no Docker healthcheck defined since Phase 1 (the other
+  three FastAPI services do) — invisible until the Phase 2 compose smoke
+  test's health-wait loop timed out on a service that was actually running
+  fine. Added the same healthcheck pattern used by the other services.
+
+**Compose smoke test** (`make smoke` / `scripts/compose_smoke_test.sh`) —
+brings up the entire real stack (Postgres, Redpanda, all three APIs, both
+outbox relays, the order-validator consumer, the saga consumer) and:
+- Seeded a fulfillment node + stock via the Inventory Service.
+- Created a real order through the API Gateway; polled until the saga
+  carried it through `CREATED -> VALIDATED -> INVENTORY_PENDING ->
+  INVENTORY_RESERVED -> FULFILLMENT_ASSIGNED -> PROCESSING -> SHIPPED`.
+  **PASS** — reached `SHIPPED`, `saga_instances.status = COMPLETED`, 0 dead
+  letters, stock correctly decremented (`10 -> 8` for a 2-unit order).
+- Separately, live-tested the compensation path: an order for
+  `SKU-PAYMENT-DECLINE` reached `FAILED`, its `saga_instances` row shows
+  `failed_step: AUTHORIZE_PAYMENT`, `compensations_applied` released the
+  reservation, and the inventory row was actually restored
+  (`available_qty` back to 5, `reserved_qty` back to 0) — confirmed via
+  direct `GET /stock/...` against the live inventory-service, not inferred.
+- Confirmed `GET /dead-letters` stayed empty across both live runs.

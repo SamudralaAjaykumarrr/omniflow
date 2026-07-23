@@ -94,3 +94,77 @@ pointers to the ADRs when they do.
     the same in-process counter. Fixed by overriding the env vars
     unconditionally, and by making the rate-limit counter live on
     `app.state` so a test can explicitly reset it.
+
+## 2026-07-24 — Phase 2: Event platform
+
+- Redpanda added as a single-broker Compose service (`--smp=1 --memory=512M
+  --overprovisioned`) plus a one-shot `redpanda-topics` job creating all 11
+  event-catalog topics idempotently (`rpk topic create` per topic, skipping
+  ones that already exist).
+- Added `event_contracts.kafka`: thin `build_producer`/`publish_envelope`/
+  `build_consumer` wrappers plus a generic `run_consume_loop(consumer,
+  process, on_dead_letter, ...)` that retries with backoff+jitter and routes
+  to a caller-supplied dead-letter callback on exhaustion, always committing
+  the offset afterward either way. This one function is reused by both
+  order-service's validator consumer and the orchestrator's saga consumer —
+  legitimate shared infra (not business logic), consistent with ADR 0008's
+  carve-out for `event-contracts` as the one shared package.
+- **Order Service auto-validates asynchronously, not inline in
+  `create_order`.** Considered inlining `CREATED -> VALIDATED` directly into
+  order creation (simpler), but that would have changed `POST /orders`'s
+  response from Phase 1 (`status: CREATED`) and broken a working, already-
+  passing Phase 1 test — explicitly out of bounds per this phase's
+  instructions. Instead, Order Service gained its own tiny Kafka consumer
+  (`app/validator_consumer.py`) that consumes its own `order.created` event,
+  performs a (currently placeholder, always-passes) validation, and emits
+  `order.validated`. This also means the idempotent-consumer pattern is now
+  demonstrated in two independent services, not just the orchestrator.
+- **Saga coordination is direct synchronous REST, not a second async
+  round-trip.** The orchestrator's real Kafka consumption
+  (`order.validated`, `order.cancelled`) starts/aborts a saga; every
+  subsequent step (reserve, check stock, transition order status, release on
+  compensation) is a direct REST call to Order Service / Inventory Service.
+  Both services still publish their full event catalog via their own
+  outboxes for the data platform. Full reasoning, the node-scoring formula,
+  and the alternatives considered are in
+  [ADR 0010](docs/adrs/0010-node-scoring-and-saga-orchestration.md).
+  `docs/architecture.md`'s sequence/flow diagrams were updated to match this
+  reality rather than the earlier, more choreography-flavored Phase 0 sketch.
+- Payment simulation is a deterministic, stateless, in-process module keyed
+  by marker SKUs (`SKU-PAYMENT-DECLINE`, `SKU-PAYMENT-TIMEOUT-RECOVER`,
+  `SKU-PAYMENT-TIMEOUT-PERSISTENT`) rather than randomized outcomes — so
+  saga tests (and later the Phase 8 failure lab) can deterministically
+  reproduce every outcome (hard decline, transient-then-recovers,
+  transient-exhausts) without flakiness.
+- Saga durability: each step commits `saga_instances.current_step` and a
+  JSON `context` scratchpad before returning, and `resume_incomplete_sagas`
+  re-enters any row still `RUNNING` from that step on orchestrator startup.
+  A narrow, explicitly accepted resume gap is documented in `RISKS.md`
+  rather than solved: a crash strictly between a successful remote
+  reservation and this step's local commit leaves no local record of that
+  reservation, and the saga fails loudly instead of guessing or
+  double-reserving.
+- **Real bugs found while verifying Phase 2's test suite, fixed before
+  trusting any result** (full detail in `TEST_RESULTS.md`):
+  - The node-scoring formula's distance/delivery normalization divided each
+    candidate's value by the set's max — which is always 1.0 for a lone or
+    all-tied candidate, making `1 - 1.0 = 0.0` (worst) instead of `1.0`
+    (best, trivially, being the only option). Fixed with proper min-max
+    normalization; caught by a dedicated single-candidate test before it
+    shipped.
+  - Phase 1's test fixtures managed schema via `Base.metadata.drop_all`/
+    `create_all`, bypassing Alembic entirely, while Phase 1's entrypoint fix
+    made `alembic upgrade head` run unconditionally before every test
+    invocation. The two together desynced `alembic_version` (claiming
+    migration `0001` applied) from actual table state (dropped by the prior
+    test session's teardown), so Phase 2's new migration failed trying to
+    alter a table that didn't exist. Fixed by dropping `drop_all` from every
+    service's test fixtures (truncate, never touch Alembic's bookkeeping)
+    and manually repairing the already-desynced test databases once. This
+    is the kind of cross-phase interaction that's easy to miss when each
+    phase's tests pass in isolation — worth remembering for any future
+    schema-affecting change.
+  - `api-gateway` had no Docker healthcheck since Phase 1 — invisible until
+    this phase's compose smoke test's health-wait loop timed out on a
+    service that was actually fine. Added the same healthcheck pattern the
+    other three services already use.

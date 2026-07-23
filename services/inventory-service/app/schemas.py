@@ -68,6 +68,28 @@ class NodeResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class StockCheckItem(BaseModel):
+    sku: str = Field(min_length=1, max_length=64)
+    qty: int = Field(gt=0)
+
+
+class StockCheckRequest(BaseModel):
+    node_id: uuid.UUID
+    items: list[StockCheckItem] = Field(min_length=1)
+
+
+class StockCheckShortfall(BaseModel):
+    sku: str
+    requested_qty: int
+    available_qty: int
+
+
+class StockCheckResponse(BaseModel):
+    node_id: uuid.UUID
+    sufficient: bool
+    shortfalls: list[StockCheckShortfall]
+
+
 class ErrorResponse(BaseModel):
     error_code: str
     message: str

@@ -3,7 +3,7 @@ name = "omniflow-event-contracts"
 version = "0.1.0"
 description = "Shared versioned event envelope and event-type constants for OmniFlow"
 requires-python = ">=3.12"
-dependencies = ["pydantic>=2.7"]
+dependencies = ["pydantic>=2.7", "confluent-kafka>=2.5,<3.0"]
 
 [build-system]
 requires = ["setuptools>=68"]

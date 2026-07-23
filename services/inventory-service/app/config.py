@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,6 +11,9 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://omniflow:omniflow@postgres:5432/omniflow_inventory"
     reservation_ttl_minutes: int = 15
     low_stock_default_threshold: int = 10
+    kafka_bootstrap_servers: str = Field(
+        default="redpanda:9092", validation_alias="KAFKA_BOOTSTRAP_SERVERS"
+    )
 
 
 @lru_cache

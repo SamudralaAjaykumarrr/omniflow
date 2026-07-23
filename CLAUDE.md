@@ -50,6 +50,14 @@ if unsure, rather than guessing.
   causes of any failure, update docs, review the diff, make one descriptive
   commit, update `PROJECT_STATUS.md` (and `RISKS.md`/`DECISIONS.md`/
   `TEST_RESULTS.md` if anything changed there).
+- **Test schema fixtures must never `Base.metadata.drop_all`.** Every
+  service's `entrypoint.sh` runs `alembic upgrade head` unconditionally
+  before handing off to any command, including `pytest` — so Alembic, not
+  the test fixtures, owns schema. A fixture that drops tables after a test
+  session leaves `alembic_version` claiming a migration is applied while the
+  tables it created are gone, and the next migration you add will fail
+  trying to alter a table that doesn't exist (hit for real in Phase 2, see
+  `DECISIONS.md`/`RISKS.md` #12). Truncate for cleanup, never drop.
 
 ## Engineering conventions
 
