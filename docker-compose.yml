@@ -1,0 +1,69 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-omniflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-omniflow_dev_only}
+    ports:
+      - "5432:5432"
+    volumes:
+      - omniflow_postgres_data:/var/lib/postgresql/data
+      - ./infra/docker/postgres/init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-omniflow}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  order-service:
+    build:
+      context: .
+      dockerfile: services/order-service/Dockerfile
+    environment:
+      ORDER_SERVICE_DATABASE_URL: ${ORDER_SERVICE_DATABASE_URL:-postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/omniflow_orders}
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  inventory-service:
+    build:
+      context: .
+      dockerfile: services/inventory-service/Dockerfile
+    environment:
+      INVENTORY_SERVICE_DATABASE_URL: ${INVENTORY_SERVICE_DATABASE_URL:-postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/omniflow_inventory}
+    ports:
+      - "8002:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    environment:
+      GATEWAY_ORDER_SERVICE_URL: http://order-service:8000
+      GATEWAY_INVENTORY_SERVICE_URL: http://inventory-service:8000
+      GATEWAY_RATE_LIMIT_PER_MINUTE: ${GATEWAY_RATE_LIMIT_PER_MINUTE:-120}
+    ports:
+      - "8080:8000"
+    depends_on:
+      order-service:
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+
+volumes:
+  omniflow_postgres_data:

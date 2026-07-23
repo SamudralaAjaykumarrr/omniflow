@@ -59,10 +59,26 @@ ops dashboard and a Prometheus/Grafana/Jaeger stack make all of it observable.
 
 ## Running it locally
 
-Not yet available — no Dockerfiles or compose stack exist until Phase 1
-lands. This section will be replaced with the real `docker compose up` /
-`make demo` instructions the moment they're true; see `PROJECT_STATUS.md`
-for current phase.
+Requires only Docker + Docker Compose — no paid services, no host Python/
+Node/Java/Terraform.
+
+```
+cp .env.example .env
+make demo        # docker compose up --build, then prints the service URLs
+```
+
+- API Gateway (edge, start here): http://localhost:8080/docs
+- Order Service (direct): http://localhost:8001/docs
+- Inventory Service (direct): http://localhost:8002/docs
+
+Other useful targets: `make test` (all service test suites, each against
+its own `*_test` database), `make lint` / `make format`, `make migrate`
+(apply Alembic migrations), `make reset` (tear down containers *and*
+volumes for a clean slate), `make logs`.
+
+As of Phase 1, only order creation/lookup/cancellation and inventory
+stock/reservation are live — no event bus, data pipeline, or dashboard yet
+(see `PROJECT_STATUS.md`).
 
 ## License
 

@@ -1,0 +1,14 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["**/migrations/versions/**"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# B008: FastAPI's `Depends(...)` as a parameter default is the framework's
+# documented dependency-injection pattern, not the mutable-default-argument
+# bug this rule otherwise correctly catches.
+ignore = ["B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "event_contracts"]

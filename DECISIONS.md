@@ -43,3 +43,54 @@ pointers to the ADRs when they do.
   "finished" depth across all 16 spec sections simultaneously — recorded as
   the primary scope-management decision for this project (see `RISKS.md`,
   "Scope vs. depth").
+
+## 2026-07-23 — Phase 1: Core domain
+
+- Built `event-contracts`, `order-service`, `inventory-service`, and
+  `api-gateway` per the plan; wired them together with `docker-compose.yml`,
+  per-service Dockerfiles, a Postgres init script creating one database per
+  service (plus a `*_test` twin), a `Makefile`, and `.env.example`.
+- Two per-service databases share one Postgres container in local dev
+  (`omniflow_orders`, `omniflow_inventory`, and their `_test` twins) rather
+  than one database per service in separate containers — keeps the local
+  resource footprint down while still enforcing the "no live cross-service
+  FKs" boundary from ADR 0008 (they're genuinely separate databases, not
+  just separate schemas in one).
+- Gateway rate limiting is a simple in-process fixed-window counter (not
+  Redis-backed) — correct and testable for a single-instance local demo,
+  explicitly not a multi-instance-safe design; documented in the middleware
+  docstring and `docs/reliability.md` will restate it when that doc lands.
+- **Real bugs found while verifying Phase 1's own test suite, fixed before
+  trusting any result** (see `TEST_RESULTS.md` for the full list; recorded
+  here for the *why*, since these are the kind of mistake worth remembering):
+  - `entrypoint.sh` (both stateful services) ran `alembic upgrade head` then
+    unconditionally `exec uvicorn ...`, ignoring any command passed to
+    `docker compose run`/`docker run`. A `docker compose run --rm
+    order-service sh -c "pytest ..."` therefore silently started the API
+    server instead of running tests — no error, just a container that sat
+    there "healthy" forever. Fixed by having the entrypoint `exec "$@"` when
+    given arguments, only defaulting to serving when given none. This is
+    the kind of bug that produces a false-green (or in this case, a
+    false-nothing) result if you don't notice the command never actually
+    ran — always check that a "passing" test run actually printed test
+    output, not just a clean exit.
+  - The concurrency test spawned threads that each read `seeded_node.id` off
+    a single ORM object bound to the main thread's DB session —
+    SQLAlchemy sessions aren't thread-safe, so concurrent lazy-loads on the
+    same object under-counted the expected number of rejections. Fixed by
+    reading the plain UUID once, before spawning threads, and passing that
+    value in instead of the ORM object.
+  - The gateway's proxy layer copied the inbound `X-Correlation-ID` header
+    into a plain dict *and* separately set the same header under a
+    different-case key, producing two dict entries that httpx sent as two
+    header lines — which the receiving side joined into one
+    comma-separated, duplicated value. Fixed by excluding the correlation
+    header from the copied set before adding it back once.
+  - Two gateway tests were order-dependent on shared state: an
+    `os.environ.setdefault` for dummy upstream URLs was silently a no-op
+    because `docker compose run` already injects the real (reachable)
+    service URLs as actual environment variables; and a rate-limit test's
+    lowered threshold tripped on hits left over from earlier tests sharing
+    the same in-process counter. Fixed by overriding the env vars
+    unconditionally, and by making the rate-limit counter live on
+    `app.state` so a test can explicitly reset it.
