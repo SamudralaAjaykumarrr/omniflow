@@ -167,3 +167,124 @@ outbox relays, the order-validator consumer, the saga consumer) and:
   (`available_qty` back to 5, `reserved_qty` back to 0) — confirmed via
   direct `GET /stock/...` against the live inventory-service, not inferred.
 - Confirmed `GET /dead-letters` stayed empty across both live runs.
+
+### 2026-07-24 — Phase 3: Observability
+
+Commands run (via `docker run --rm ... mypy`, `docker compose run --rm
+<service> pytest --cov=app --cov-report=term-missing` against each
+service's `*_test` database, and `docker run --rm ... pytest
+--cov=event_contracts` for the shared package):
+
+**Type checking** (`make typecheck` — mypy 1.11.2, `--ignore-missing-imports`,
+one invocation per service so each service's identically-named `app`
+package isn't treated as a duplicate module): all five packages pass clean
+— `event_contracts` (8 files), `order-service/app` (14 files),
+`inventory-service/app` (14 files), `fulfillment-orchestrator/app` (18
+files), `api-gateway/app` (7 files). Two real findings fixed: a custom
+Prometheus collector (`DBPoolCollector`) didn't formally inherit from
+`prometheus_client`'s `Collector` ABC; and a redundant/invalid inline type
+annotation on a non-`self` attribute assignment
+(`app.state.rate_limit_hits: dict[...] = ...`) in api-gateway's `main.py`
+— Phase 1 code, fixed as a zero-behavior-change annotation removal. One
+suppressed with a scoped `# type: ignore[arg-type]` and an explanatory
+comment: SQLAlchemy's own stub for `Mutable.as_mutable` only declares the
+`TypeEngine` *instance* form, but passing the class (`JSONB`, not
+`JSONB()`) is the documented, runtime-supported idiom — a stub gap, not a
+real bug, in Phase 2's `fulfillment-orchestrator/app/models.py`.
+
+**event-contracts** — 37 passed, 0 failed, 87% coverage (321 stmts, 41
+missed — mostly `kafka.py`'s real-Kafka-client code paths and a few
+unreached tracing/logging edges, exercised for real in the compose smoke
+test, not these no-broker-needed unit tests). 11 new tests since Phase 2:
+`logging_setup.py`'s `JsonFormatter` (valid JSON, correlation ID
+included/null, extra fields, exception rendering), `metrics_setup.py`'s
+`MetricsMiddleware`/`metrics_response`/`DBPoolCollector`/`kafka_stats_callback`,
+`tracing_setup.py`'s traceparent capture/round-trip, and `kafka.py`'s
+`run_consume_loop` gained a correlation-ID-set-and-cleared test and a
+retry/dead-letter-counter-increments test.
+
+**order-service** — 34 passed, 0 failed, 91% coverage (525 stmts, 48
+missed — same shape as Phase 2, plus the outbox relay's new tracing-span
+branches and the validator consumer's metrics-server startup path, neither
+exercised by no-broker unit tests).
+
+**inventory-service** — 18 passed, 0 failed, 93% coverage (469 stmts, 33
+missed). 2 new tests: `app/metrics.py`'s
+`INVENTORY_RESERVATION_CONFLICTS_TOTAL` increments on a real 409, and the
+`GET /metrics` route exposes Prometheus text format.
+
+**fulfillment-orchestrator** — 29 passed, 0 failed, 61% coverage (762
+stmts, 294 missed — `main.py`/`routes.py`/`schemas.py`/`outbox_relay.py`/
+`middleware.py` are exercised over real HTTP/Kafka in the compose smoke
+test, same Phase 2 pattern). 2 new tests: `app/metrics.py`'s
+`SAGA_DURATION_SECONDS` observes a real positive duration with the
+`completed` label on a successful saga and the `failed` label on a
+declined-payment saga.
+
+**api-gateway** — 9 passed, 0 failed, 93% coverage (unchanged from Phase
+1/2 — no new gateway-specific tests this phase; its metrics/tracing wiring
+is exercised end-to-end in the compose smoke test below).
+
+**Total: 127 passed, 0 failed** across the five suites (37 + 34 + 18 + 29 + 9).
+
+Lint/format: `ruff check .` — all checks passed (after `ruff check --fix`
+resolved 9 import-ordering findings — `event_contracts` imports weren't
+grouped consistently across the newly-touched files). `ruff format --check
+.` — 102 files formatted, 0 remaining (after `ruff format .` reformatted 4
+files this phase touched).
+
+**Real bugs found and fixed during this test pass** (full writeup in
+`DECISIONS.md`):
+- A custom `prometheus_client` collector (`DBPoolCollector`) wasn't
+  registered as a real `Collector` subclass — worked at runtime (Python
+  duck-typing), but is exactly the kind of thing a first real type-check
+  pass exists to catch before it silently drifts from the library's actual
+  interface.
+- `scripts/compose_smoke_test.sh` used hardcoded values
+  (`smoke-test-node`, `SKU-SMOKE`, `smoke@example.com`) that are fine
+  against a fresh `docker compose up -d -v` volume but violate real unique
+  constraints (`fulfillment_nodes.name`, `customers.email`) on any
+  re-run against a persistent dev database — caught by actually re-running
+  `make smoke` twice in this session rather than trusting a single pass.
+  Fixed by suffixing all three with a per-run random ID, same pattern the
+  script already used for `customer_id`/`Idempotency-Key`.
+- `event-contracts`' own test suite silently depended on `httpx` (via
+  `starlette.testclient`, used by the new `MetricsMiddleware` test)
+  without declaring it — passed locally by accident wherever httpx
+  happened to already be installed, failed clean in a fresh container.
+  Fixed by adding it to `make test-contracts`'s ad hoc pip install, same
+  place `pytest`/`pytest-cov` already live (event-contracts' `pyproject.toml`
+  intentionally lists only real runtime dependencies).
+
+**Compose smoke test** (`make smoke` / `scripts/compose_smoke_test.sh`) —
+brings up the entire real stack including the new observability services
+(Jaeger, OTel Collector, Prometheus, Grafana — 17 containers total) and:
+- Ran the full Phase 2 order-lifecycle assertions unchanged: order reached
+  `SHIPPED`, saga `COMPLETED`, 0 dead letters, stock correctly decremented.
+- **Traces**: queried Jaeger's API for each of `api-gateway`,
+  `order-service`, `inventory-service`, `fulfillment-orchestrator` —
+  real traces present for all four. Manually inspected one full trace
+  (`0e2292f36a0af1ce302787ab1468f55f`) end-to-end: a single trace ID
+  covers `api-gateway`'s `POST /api/orders`, `order-service`'s handler,
+  `order-service`'s own `publish order.created` / `consume order.created`
+  / `publish order.validated` (its internal validator consumer),
+  `fulfillment-orchestrator`'s `consume order.validated` and every
+  subsequent saga step (REST calls to order-service and
+  inventory-service — node scoring, stock checks, reservation, status
+  transitions), all the way to `publish inventory.reserved` and `publish
+  order.shipped` — confirming the envelope's `trace_context.traceparent`
+  round-trip across the Kafka boundary actually works, not just in unit
+  tests with an in-memory exporter.
+- **Metrics**: queried Prometheus's `/api/v1/targets` — all 10 scrape
+  targets (4 FastAPI services + 5 background workers + Prometheus itself)
+  report `health: up`. Queried `sum(http_requests_total)` — real nonzero
+  value (142 at the time of the run). Spot-checked `kafka_consumer_lag` (5
+  series), `saga_duration_seconds_count` (1 series, the completed saga
+  above), `db_pool_checked_out_connections` (3 series, one per
+  stateful service).
+- **Grafana**: `GET /api/health` OK; `GET /api/datasources/uid/prometheus`
+  confirms the provisioned Prometheus datasource is live; `GET
+  /api/search?query=OmniFlow` finds the provisioned "OmniFlow Overview"
+  dashboard.
+- Scanned every background worker's logs plus the OTel Collector's logs
+  for errors/exceptions/warnings after the full run — none found.

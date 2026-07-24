@@ -70,15 +70,22 @@ make demo        # docker compose up --build, then prints the service URLs
 - API Gateway (edge, start here): http://localhost:8080/docs
 - Order Service (direct): http://localhost:8001/docs
 - Inventory Service (direct): http://localhost:8002/docs
+- Fulfillment Orchestrator (direct): http://localhost:8003/docs
+- Jaeger (distributed traces): http://localhost:16686
+- Prometheus (metrics): http://localhost:9090
+- Grafana (dashboards, anonymous admin access): http://localhost:3000
 
 Other useful targets: `make test` (all service test suites, each against
-its own `*_test` database), `make lint` / `make format`, `make migrate`
-(apply Alembic migrations), `make reset` (tear down containers *and*
-volumes for a clean slate), `make logs`.
+its own `*_test` database), `make typecheck` (mypy), `make lint` / `make
+format`, `make migrate` (apply Alembic migrations), `make smoke`
+(end-to-end order lifecycle + observability verification against the real
+running stack), `make reset` (tear down containers *and* volumes for a
+clean slate), `make logs`.
 
-As of Phase 1, only order creation/lookup/cancellation and inventory
-stock/reservation are live — no event bus, data pipeline, or dashboard yet
-(see `PROJECT_STATUS.md`).
+As of Phase 3, the full order lifecycle (creation through saga-driven
+fulfillment), the Kafka-based event bus, and full observability (structured
+logs, distributed tracing, metrics, dashboards) are live — no data
+pipeline, forecasting, or ops dashboard yet (see `PROJECT_STATUS.md`).
 
 ## License
 

@@ -1,14 +1,20 @@
-import logging
-
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
+from app.config import get_settings
+from app.db import get_engine
 from app.middleware import CorrelationIdMiddleware
 from app.routes import router
 from app.schemas import ErrorResponse
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+from event_contracts import (
+    MetricsMiddleware,
+    configure_logging,
+    configure_tracing,
+    metrics_response,
+    register_db_pool_collector,
+)
 
 _ERROR_CODES_BY_STATUS = {
     404: "not_found",
@@ -16,13 +22,25 @@ _ERROR_CODES_BY_STATUS = {
     422: "validation_error",
 }
 
+_settings = get_settings()
+configure_logging(_settings.service_name)
+configure_tracing(_settings.service_name, _settings.otel_exporter_otlp_endpoint)
+register_db_pool_collector(get_engine())
+
 app = FastAPI(
     title="OmniFlow Inventory Service",
     description="Stock levels, concurrency-safe reservations, and release/expiry.",
     version="0.1.0",
 )
+app.add_middleware(MetricsMiddleware)
 app.add_middleware(CorrelationIdMiddleware)
 app.include_router(router)
+FastAPIInstrumentor.instrument_app(app)
+
+
+@app.get("/metrics")
+def metrics():
+    return metrics_response()
 
 
 @app.exception_handler(RequestValidationError)

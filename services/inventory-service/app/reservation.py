@@ -21,6 +21,7 @@ from app.exceptions import (
     ReservationNotFoundError,
     UnknownStockError,
 )
+from app.metrics import INVENTORY_RESERVATION_CONFLICTS_TOTAL
 from app.models import InventoryReservation, InventoryStock, ReservationStatus
 from app.outbox import stage_event
 from app.schemas import ReserveRequest
@@ -58,6 +59,7 @@ def reserve_stock(db: Session, request: ReserveRequest) -> InventoryReservation:
             },
         )
         db.commit()
+        INVENTORY_RESERVATION_CONFLICTS_TOTAL.labels(request.sku).inc()
         raise InsufficientStockError(
             request.sku, str(request.node_id), request.qty, stock.available_qty
         )

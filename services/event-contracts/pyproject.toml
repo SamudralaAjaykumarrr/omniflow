@@ -3,7 +3,24 @@ name = "omniflow-event-contracts"
 version = "0.1.0"
 description = "Shared versioned event envelope and event-type constants for OmniFlow"
 requires-python = ">=3.12"
-dependencies = ["pydantic>=2.7", "confluent-kafka>=2.5,<3.0"]
+dependencies = [
+  "pydantic>=2.7",
+  "confluent-kafka>=2.5,<3.0",
+  # Exact pins, not ranges: opentelemetry-instrumentation-* (installed
+  # per-service) each pin an exact matching opentelemetry-semantic-conventions
+  # version, so letting these three float independently — even within a
+  # "compatible" range — lets pip resolve a newer api/sdk than the
+  # instrumentation packages were actually built against, producing a real
+  # (if non-fatal-looking) dependency conflict at install time.
+  "opentelemetry-api==1.27.0",
+  "opentelemetry-sdk==1.27.0",
+  "opentelemetry-exporter-otlp-proto-http==1.27.0",
+  "prometheus-client>=0.20,<0.22",
+  "starlette>=0.38,<0.39",
+  # opentelemetry-instrumentation-* (installed per-service, not here) needs
+  # pkg_resources for entry-point discovery; setuptools>=81 removed it.
+  "setuptools<81",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

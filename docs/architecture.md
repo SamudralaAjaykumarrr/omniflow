@@ -54,12 +54,17 @@ C4Container
   Rel(dq, minio, "reads Silver/Gold, writes DQ report")
   Rel(forecast, minio, "reads Gold, writes forecast dataset")
   Rel(dashboard, minio, "reads DQ report / forecast / gold summaries", "via a thin read API")
-  Rel(gateway, otel_collector, "traces")
-  Rel(orders, otel_collector, "traces")
-  Rel(inventory, otel_collector, "traces")
-  Rel(orchestrator, otel_collector, "traces")
-  Rel(otel_collector, jaeger, "traces")
-  Rel(otel_collector, prometheus, "metrics")
+  Rel(gateway, otel_collector, "traces (OTLP)")
+  Rel(orders, otel_collector, "traces (OTLP)")
+  Rel(inventory, otel_collector, "traces (OTLP)")
+  Rel(orchestrator, otel_collector, "traces (OTLP)")
+  Rel(outbox_relay, otel_collector, "traces (OTLP)")
+  Rel(otel_collector, jaeger, "traces (OTLP)")
+  Rel(prometheus, gateway, "scrapes /metrics (pull)")
+  Rel(prometheus, orders, "scrapes /metrics (pull)")
+  Rel(prometheus, inventory, "scrapes /metrics (pull)")
+  Rel(prometheus, orchestrator, "scrapes /metrics (pull)")
+  Rel(prometheus, outbox_relay, "scrapes standalone /metrics server (pull)")
   Rel(grafana, prometheus, "queries")
 ```
 
@@ -254,18 +259,39 @@ flowchart TB
 
 ## Observability flow
 
+Traces (push) and metrics (pull) travel through separate paths, per
+`services/event-contracts/event_contracts/{tracing,metrics}_setup.py`.
+**Traces**: every FastAPI process and every background worker (both outbox
+relays, the order-service validator consumer, the orchestrator's saga
+consumer) calls `configure_tracing`, which exports OTLP spans to the OTel
+Collector; the collector forwards them to Jaeger's own OTLP receiver. A
+span's context crosses the Kafka boundary through the event envelope's own
+`trace_context.traceparent` field (W3C Trace Context) — captured at
+`stage_event` time, re-extracted by the outbox relay's publish span and
+again by `run_consume_loop`'s consumer span — so one order's HTTP request,
+its outbox publish, and every saga step a Kafka event triggers land in the
+**same trace** in Jaeger, confirmed end-to-end by `scripts/compose_smoke_test.sh`.
+**Metrics**: every FastAPI process serves its own `/metrics` route on its
+normal port; every background worker runs a standalone `prometheus_client`
+HTTP server on its own port (`METRICS_PORT`, see each service's
+`app/config.py`) — Prometheus scrapes all of them directly (pull), never
+through the collector. Grafana's one provisioned datasource points at
+Prometheus.
+
 ```mermaid
 flowchart LR
-  subgraph Services
-    GW[API Gateway] --> OTEL
-    OS[Order Service] --> OTEL
-    INV[Inventory Service] --> OTEL
-    ORCH[Orchestrator] --> OTEL
+  subgraph Services["FastAPI services + background workers"]
+    GW[API Gateway]
+    OS[Order Service<br/>+ validator consumer]
+    INV[Inventory Service]
+    ORCH[Orchestrator<br/>+ saga consumer]
+    RELAYS[3x Outbox Relays]
   end
-  OTEL[OTel Collector] --> JAEGER[Jaeger - traces]
-  OTEL --> PROM[Prometheus - metrics]
+  GW & OS & INV & ORCH & RELAYS -->|OTLP spans| OTEL[OTel Collector]
+  OTEL --> JAEGER[Jaeger - traces]
+  PROM[Prometheus] -->|scrapes /metrics, pull| GW & OS & INV & ORCH & RELAYS
   PROM --> GRAF[Grafana - dashboards]
-  GW & OS & INV & ORCH -->|structured JSON logs w/ correlation_id| STDOUT[stdout -> docker logs]
+  GW & OS & INV & ORCH & RELAYS -->|structured JSON logs w/ correlation_id| STDOUT[stdout -> docker logs]
 ```
 
 ## Service boundaries — responsibility summary

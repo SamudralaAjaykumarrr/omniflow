@@ -12,6 +12,8 @@ import logging
 import uuid
 from datetime import UTC, datetime
 
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from prometheus_client import start_http_server
 from sqlalchemy.orm import sessionmaker
 
 from app.clients import InventoryServiceClient, OrderServiceClient
@@ -25,7 +27,15 @@ from app.saga import (
     handle_order_validated,
     resume_incomplete_sagas,
 )
-from event_contracts import EventEnvelope, EventType, build_consumer, run_consume_loop
+from event_contracts import (
+    EventEnvelope,
+    EventType,
+    build_consumer,
+    configure_logging,
+    configure_tracing,
+    kafka_stats_callback,
+    run_consume_loop,
+)
 
 logger = logging.getLogger("fulfillment_orchestrator.consumer")
 
@@ -92,8 +102,11 @@ def dead_letter(
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = get_settings()
+    configure_logging(settings.service_name)
+    configure_tracing(settings.service_name, settings.otel_exporter_otlp_endpoint)
+    HTTPXClientInstrumentor().instrument()
+    start_http_server(settings.metrics_port)
     session_factory = sessionmaker(bind=get_engine(), future=True)
     order_client = OrderServiceClient(settings.order_service_url)
     inventory_client = InventoryServiceClient(settings.inventory_service_url)
@@ -107,6 +120,7 @@ def main() -> None:
         settings.kafka_bootstrap_servers,
         group_id=CONSUMER_NAME,
         topics=[EventType.ORDER_VALIDATED, EventType.ORDER_CANCELLED],
+        stats_cb=kafka_stats_callback(),
     )
     logger.info("%s consumer started", CONSUMER_NAME)
 

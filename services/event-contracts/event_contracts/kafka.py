@@ -4,6 +4,12 @@ publish an `EventEnvelope` as JSON, parse one back out, and run a generic
 retry-then-dead-letter consume loop. What counts as "processed successfully",
 idempotency bookkeeping, and how a dead letter gets persisted are each
 service's own responsibility (passed in as callbacks), not duplicated here.
+
+The consume loop also carries the platform's cross-cutting observability:
+it sets `correlation_id_var` (structured logging), starts a tracing span
+extracted from the envelope's stored `trace_context.traceparent` (so the
+consumer span lands in the same Jaeger trace as whatever created the
+event), and increments retry/dead-letter Prometheus counters.
 """
 
 from __future__ import annotations
@@ -13,8 +19,14 @@ import time
 from collections.abc import Callable, Iterable
 
 from confluent_kafka import Consumer, Message, Producer
+from opentelemetry import trace
 
 from event_contracts.envelope import EventEnvelope
+from event_contracts.logging_setup import correlation_id_var
+from event_contracts.metrics_setup import KAFKA_CONSUMER_RETRY_TOTAL, KAFKA_DEAD_LETTER_TOTAL
+from event_contracts.tracing_setup import context_from_traceparent
+
+_tracer = trace.get_tracer(__name__)
 
 
 class KafkaPublishError(Exception):
@@ -65,19 +77,30 @@ def publish_envelope(
         raise KafkaPublishError(topic, envelope.event_id, delivery_errors[0])
 
 
-def build_consumer(bootstrap_servers: str, group_id: str, topics: Iterable[str]) -> Consumer:
+def build_consumer(
+    bootstrap_servers: str,
+    group_id: str,
+    topics: Iterable[str],
+    stats_cb: Callable[[str], None] | None = None,
+) -> Consumer:
     """Manual offset commits — a message's offset is only committed after
     the caller has finished processing it (including DLQ routing on
     failure), never automatically in the background. That is what makes
-    "commit after DLQ" a real guarantee instead of a race."""
-    consumer = Consumer(
-        {
-            "bootstrap.servers": bootstrap_servers,
-            "group.id": group_id,
-            "auto.offset.reset": "earliest",
-            "enable.auto.commit": False,
-        }
-    )
+    "commit after DLQ" a real guarantee instead of a race.
+
+    `stats_cb` (paired with `statistics.interval.ms`) is how consumer lag is
+    measured — see `event_contracts.metrics_setup.kafka_stats_callback`.
+    """
+    config = {
+        "bootstrap.servers": bootstrap_servers,
+        "group.id": group_id,
+        "auto.offset.reset": "earliest",
+        "enable.auto.commit": False,
+    }
+    if stats_cb is not None:
+        config["stats_cb"] = stats_cb
+        config["statistics.interval.ms"] = 15000
+    consumer = Consumer(config)
     consumer.subscribe(list(topics))
     return consumer
 
@@ -110,6 +133,11 @@ def run_consume_loop(
     routing, **never before either** — that ordering is what makes "a
     poison message doesn't block the partition forever, but also doesn't
     get silently skipped" an actual guarantee rather than a race.
+
+    Each message is processed with `correlation_id_var` set to the
+    envelope's `correlation_id` (structured logs) and inside a tracing span
+    that is a child of whatever span was active when the event was created
+    (`envelope.trace_context.traceparent`) — see `event_contracts.tracing_setup`.
     """
     while running():
         msg = consumer.poll(poll_timeout)
@@ -119,17 +147,32 @@ def run_consume_loop(
             continue  # transient broker-level poll error; retried on next poll
 
         envelope = parse_envelope(msg)
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                process(envelope)
-                break
-            except Exception as exc:  # noqa: BLE001 - must catch everything to route to DLQ
-                if attempt >= max_attempts:
-                    on_dead_letter(envelope, exc, attempt)
-                    break
-                delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
-                delay += random.uniform(0, delay * 0.1)
-                time.sleep(delay)
+        correlation_token = correlation_id_var.set(envelope.correlation_id)
+        try:
+            span_context = context_from_traceparent(envelope.trace_context.traceparent)
+            with _tracer.start_as_current_span(
+                f"consume {envelope.event_type}", context=span_context
+            ) as span:
+                span.set_attribute("correlation_id", envelope.correlation_id)
+                span.set_attribute("event_id", envelope.event_id)
+                span.set_attribute("event_type", envelope.event_type)
+
+                attempt = 0
+                while True:
+                    attempt += 1
+                    try:
+                        process(envelope)
+                        break
+                    except Exception as exc:  # noqa: BLE001 - must catch everything to route to DLQ
+                        if attempt >= max_attempts:
+                            KAFKA_DEAD_LETTER_TOTAL.labels(envelope.event_type).inc()
+                            span.record_exception(exc)
+                            on_dead_letter(envelope, exc, attempt)
+                            break
+                        KAFKA_CONSUMER_RETRY_TOTAL.labels(envelope.event_type).inc()
+                        delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+                        delay += random.uniform(0, delay * 0.1)
+                        time.sleep(delay)
+        finally:
+            correlation_id_var.reset(correlation_token)
         consumer.commit(msg)

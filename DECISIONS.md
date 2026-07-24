@@ -168,3 +168,92 @@ pointers to the ADRs when they do.
     this phase's compose smoke test's health-wait loop timed out on a
     service that was actually fine. Added the same healthcheck pattern the
     other three services already use.
+
+## 2026-07-24 — Phase 3: Observability
+
+- **Traces are push (OTLP -> Collector -> Jaeger), metrics are pull
+  (Prometheus scrapes `/metrics` directly)** — not both funneled through
+  the OTel Collector. `docs/architecture.md`'s original Phase 0 sketch
+  showed the collector forwarding metrics to Prometheus too; that was
+  never built that way, since Prometheus's own pull model is simpler here
+  and needs no metrics-specific collector pipeline config. The
+  observability-flow diagram was corrected to match what's actually
+  running, not the earlier plan.
+- **Every FastAPI service serves `/metrics` on its normal port; every
+  background worker runs a standalone `prometheus_client` HTTP server on
+  its own `METRICS_PORT`.** Workers (outbox relays, the validator
+  consumer, the saga consumer) have no ASGI app to hang a route off of, so
+  `prometheus_client.start_http_server(port)` is the natural fit — same
+  registry, same metric objects, just a different transport. Each worker
+  gets a distinct port (9101–9105) set per `docker-compose.yml` service so
+  Prometheus can scrape them all independently.
+- **Trace context crosses the Kafka boundary through the event envelope's
+  own `trace_context.traceparent` field** (W3C Trace Context), not a
+  side-channel or Kafka header. Captured at `stage_event` time via
+  `current_traceparent()`, re-extracted by both the outbox relay's publish
+  span and `run_consume_loop`'s consumer span via
+  `context_from_traceparent()`. This is what makes one order's HTTP
+  request, its outbox publish, and every saga step a Kafka event triggers
+  land in the *same* Jaeger trace — verified for real in this phase's
+  compose smoke test (see `TEST_RESULTS.md`), not just asserted in a unit
+  test with an in-memory span exporter.
+- **The outbox relay's own publish step gets a tracing span**, not just
+  the producer/consumer either side of it. Considered leaving the relay
+  untraced (it's thin, easy to skip), but its poll-then-publish latency is
+  exactly the kind of hop a real on-call engineer would want visible
+  between "API handled the request" and "the saga consumer picked it up" —
+  skipping it would have left a blind gap in every cross-service trace.
+- **`event_contracts.kafka.run_consume_loop` owns correlation-ID-setting,
+  span-starting, and retry/dead-letter metric increments for every
+  consumer**, the same function already shared for retry+backoff+DLQ
+  logic since Phase 2. Consistent with that phase's precedent of putting
+  genuinely cross-cutting infra (not business logic) in the one shared
+  package, rather than duplicating this wiring into
+  `order-service/app/validator_consumer.py` and
+  `fulfillment-orchestrator/app/consumer.py` separately.
+- **Added `make typecheck` (mypy) as this project's first static type
+  checking pass**, run per-service (`order-service/app`,
+  `inventory-service/app`, etc. each checked as its own root) rather than
+  once across the whole repo, because every service's application package
+  is named `app` — checking them together makes mypy treat identically
+  named packages across different services as a duplicate module. This
+  mirrors the isolation Docker/pytest already give each service; it is
+  not a workaround, it's the correct unit boundary for a monorepo of
+  independently-deployable services that happen to share an internal
+  package name.
+- Scoped `make typecheck` to non-strict (`--ignore-missing-imports`,
+  default settings otherwise) rather than adopting a strict mypy config
+  retroactively — this codebase never ran a type checker before Phase 3,
+  and demanding fully-annotated strict-mode compliance from Phase 1/2 code
+  written without that constraint would mean either a large unrelated
+  reformatting pass (out of this phase's scope) or quietly disabling rules
+  until it passed (worse than not having the tool). What it does check —
+  the type hints CLAUDE.md's conventions already call for — passes clean.
+- **Grafana runs with anonymous admin access** (`GF_AUTH_ANONYMOUS_ENABLED`),
+  matching this project's "no paid services, single-command local demo,
+  nothing here guards real data" posture (see ADR 0009's authn/authz
+  scoping) — a real login system for a throwaway local Grafana instance
+  would be friction with no corresponding benefit.
+- **`scripts/compose_smoke_test.sh` was extended, not replaced**, to also
+  assert traces landed in Jaeger, every Prometheus target is up with real
+  samples, and Grafana's datasource/dashboard are provisioned —
+  consistent with Phase 2's precedent that a phase closes with something
+  that verifies its own claims against the real running stack, not just
+  unit tests with fakes.
+- **Real bugs found and fixed during this phase's verification** (full
+  detail in `TEST_RESULTS.md`):
+  - A custom `prometheus_client.registry.Collector` subclass
+    (`DBPoolCollector`) didn't formally inherit from the library's
+    `Collector` ABC — worked at runtime, caught by the first real mypy
+    pass this project has run.
+  - `scripts/compose_smoke_test.sh`'s hardcoded fulfillment-node name and
+    customer email collided with real unique constraints on any re-run
+    against a persistent dev DB volume (as opposed to a fresh
+    `docker compose up -v` volume) — a latent Phase 2 bug, invisible until
+    this phase's iterative re-testing actually re-ran `make smoke` more
+    than once against the same volume. Fixed the same way the script
+    already handled `customer_id`/`Idempotency-Key`: a random per-run
+    suffix.
+  - `event-contracts`' test suite depended on `httpx` (transitively, via
+    `starlette.testclient`) without declaring it anywhere, passing only by
+    accident on hosts where it happened to already be installed.

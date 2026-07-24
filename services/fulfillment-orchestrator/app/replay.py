@@ -24,7 +24,7 @@ from sqlalchemy.orm import sessionmaker
 from app.config import get_settings
 from app.db import get_engine
 from app.models import DeadLetterEvent
-from event_contracts import EventEnvelope, build_producer, publish_envelope
+from event_contracts import EventEnvelope, build_producer, configure_logging, publish_envelope
 
 logger = logging.getLogger("fulfillment_orchestrator.replay")
 
@@ -67,7 +67,7 @@ def replay(dead_letter_id: uuid.UUID | None, replay_all: bool) -> int:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    configure_logging(get_settings().service_name)
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--id", type=str, help="dead_letter_events.id to replay")

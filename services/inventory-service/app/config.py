@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     kafka_bootstrap_servers: str = Field(
         default="redpanda:9092", validation_alias="KAFKA_BOOTSTRAP_SERVERS"
     )
+    otel_exporter_otlp_endpoint: str = Field(
+        default="http://otel-collector:4318", validation_alias="OTEL_EXPORTER_OTLP_ENDPOINT"
+    )
+    # See order-service/app/config.py's `metrics_port` docstring — same
+    # standalone-Prometheus-server pattern for this service's outbox relay.
+    metrics_port: int = Field(default=9100, validation_alias="METRICS_PORT")
 
 
 @lru_cache

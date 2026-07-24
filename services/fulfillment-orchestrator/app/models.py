@@ -33,7 +33,13 @@ class SagaInstance(Base):
     # by SQLAlchemy's change detection, not just whole-column reassignment —
     # every step function mutates this scratchpad in place before committing.
     context: Mapped[dict] = mapped_column(
-        MutableDict.as_mutable(JSONB), nullable=False, default=dict
+        # SQLAlchemy's own stub for `as_mutable` only declares the
+        # instance form (`JSONB()`), but passing the class is the
+        # documented, runtime-supported idiom (SQLAlchemy instantiates it) —
+        # a stub gap, not a real type error.
+        MutableDict.as_mutable(JSONB),  # type: ignore[arg-type]
+        nullable=False,
+        default=dict,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

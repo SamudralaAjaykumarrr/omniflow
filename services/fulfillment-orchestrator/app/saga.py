@@ -29,6 +29,7 @@ from app.clients import (
     OrderServiceClient,
 )
 from app.config import get_settings
+from app.metrics import SAGA_DURATION_SECONDS
 from app.models import ProcessedEvent, SagaInstance
 from app.outbox import stage_event
 from app.payment import PaymentDeclinedError, PaymentGatewayTimeoutError, authorize_payment
@@ -398,6 +399,15 @@ _STEP_HANDLERS = {
 }
 
 
+def _observe_saga_duration(saga: SagaInstance) -> None:
+    now = datetime.now(UTC)
+    created_at = saga.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=UTC)
+    result = "completed" if saga.status == STATUS_COMPLETED else "failed"
+    SAGA_DURATION_SECONDS.labels(result).observe((now - created_at).total_seconds())
+
+
 def advance_saga(
     db: Session,
     order_client: OrderServiceClient,
@@ -409,6 +419,9 @@ def advance_saga(
             return
         handler = _STEP_HANDLERS[saga.current_step]
         handler(db, order_client, inventory_client, saga)
+        if saga.status != STATUS_RUNNING:
+            _observe_saga_duration(saga)
+            return
     logger.error(
         "saga %s did not reach a terminal state within %s steps",
         saga.id,

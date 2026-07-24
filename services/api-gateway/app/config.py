@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,6 +12,9 @@ class Settings(BaseSettings):
     inventory_service_url: str = "http://inventory-service:8000"
     rate_limit_per_minute: int = 120
     upstream_timeout_seconds: float = 10.0
+    otel_exporter_otlp_endpoint: str = Field(
+        default="http://otel-collector:4318", validation_alias="OTEL_EXPORTER_OTLP_ENDPOINT"
+    )
 
 
 @lru_cache

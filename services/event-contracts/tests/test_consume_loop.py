@@ -2,6 +2,8 @@ import uuid
 
 from event_contracts import EventEnvelope, EventType
 from event_contracts.kafka import run_consume_loop
+from event_contracts.logging_setup import correlation_id_var
+from event_contracts.metrics_setup import KAFKA_CONSUMER_RETRY_TOTAL, KAFKA_DEAD_LETTER_TOTAL
 
 
 class FakeMessage:
@@ -124,6 +126,52 @@ def test_permanent_failure_is_dead_lettered_and_still_committed():
     # committed even though it failed every attempt — a poison message must
     # not block the partition forever
     assert len(consumer.committed) == 1
+
+
+def test_correlation_id_is_set_during_processing_and_cleared_after():
+    envelope = _envelope()
+    consumer = FakeConsumer([FakeMessage(envelope)])
+    observed = {}
+    counter = {"polls": 0}
+
+    def process(e):
+        observed["during"] = correlation_id_var.get()
+
+    def running():
+        counter["polls"] += 1
+        return counter["polls"] <= 3
+
+    run_consume_loop(consumer, process, on_dead_letter=lambda e, err, n: None, running=running)
+
+    assert observed["during"] == envelope.correlation_id
+    assert correlation_id_var.get() is None  # reset once the message is done
+
+
+def test_retry_and_dead_letter_counters_increment():
+    envelope = _envelope()
+    consumer = FakeConsumer([FakeMessage(envelope)])
+
+    before_retry = KAFKA_CONSUMER_RETRY_TOTAL.labels(envelope.event_type)._value.get()
+    before_dlq = KAFKA_DEAD_LETTER_TOTAL.labels(envelope.event_type)._value.get()
+
+    def process(e):
+        raise ValueError("always fails")
+
+    run_consume_loop(
+        consumer,
+        process,
+        on_dead_letter=lambda e, err, n: None,
+        max_attempts=3,
+        base_delay=0.001,
+        max_delay=0.01,
+        running=lambda: len(consumer.committed) == 0,
+    )
+
+    after_retry = KAFKA_CONSUMER_RETRY_TOTAL.labels(envelope.event_type)._value.get()
+    after_dlq = KAFKA_DEAD_LETTER_TOTAL.labels(envelope.event_type)._value.get()
+
+    assert after_retry == before_retry + 2  # 3 attempts = 2 retries before giving up
+    assert after_dlq == before_dlq + 1
 
 
 def test_idle_poll_returning_none_does_not_call_process_or_commit():

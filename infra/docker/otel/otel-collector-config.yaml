@@ -1,0 +1,35 @@
+# OpenTelemetry Collector: receives OTLP traces from every service/worker
+# (event_contracts.tracing_setup.configure_tracing points each process at
+# this collector) and forwards them to Jaeger's own OTLP receiver.
+#
+# Metrics are NOT piped through here — every FastAPI service and background
+# worker exposes its own Prometheus `/metrics` endpoint (or standalone
+# prometheus_client HTTP server for workers) and Prometheus scrapes those
+# directly (pull model), per docs/architecture.md's observability-flow
+# diagram. This collector's job is traces only.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/jaeger, debug]

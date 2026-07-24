@@ -15,6 +15,7 @@ import logging
 import uuid
 from datetime import UTC, datetime
 
+from prometheus_client import start_http_server
 from sqlalchemy import update
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -28,6 +29,9 @@ from event_contracts import (
     EventType,
     build_consumer,
     build_producer,
+    configure_logging,
+    configure_tracing,
+    kafka_stats_callback,
     publish_envelope,
     run_consume_loop,
 )
@@ -121,10 +125,15 @@ def _dead_letter(
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = get_settings()
+    configure_logging(settings.service_name)
+    configure_tracing(settings.service_name, settings.otel_exporter_otlp_endpoint)
+    start_http_server(settings.metrics_port)
     consumer = build_consumer(
-        settings.kafka_bootstrap_servers, group_id=CONSUMER_NAME, topics=[EventType.ORDER_CREATED]
+        settings.kafka_bootstrap_servers,
+        group_id=CONSUMER_NAME,
+        topics=[EventType.ORDER_CREATED],
+        stats_cb=kafka_stats_callback(),
     )
     producer = build_producer(settings.kafka_bootstrap_servers)
     session_factory = sessionmaker(bind=get_engine(), future=True)

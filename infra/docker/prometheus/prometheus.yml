@@ -1,0 +1,50 @@
+# Scrape targets for every FastAPI service (own `/metrics` route, served on
+# their normal API port) and every background worker (standalone
+# prometheus_client HTTP server on its own METRICS_PORT — see
+# app/config.py's `metrics_port` in order-service/inventory-service/
+# fulfillment-orchestrator and each worker's `main()`).
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: api-gateway
+    static_configs:
+      - targets: ["api-gateway:8000"]
+
+  - job_name: order-service
+    static_configs:
+      - targets: ["order-service:8000"]
+
+  - job_name: inventory-service
+    static_configs:
+      - targets: ["inventory-service:8000"]
+
+  - job_name: fulfillment-orchestrator
+    static_configs:
+      - targets: ["fulfillment-orchestrator:8000"]
+
+  - job_name: order-outbox-relay
+    static_configs:
+      - targets: ["order-outbox-relay:9101"]
+
+  - job_name: order-validator-consumer
+    static_configs:
+      - targets: ["order-validator-consumer:9102"]
+
+  - job_name: inventory-outbox-relay
+    static_configs:
+      - targets: ["inventory-outbox-relay:9103"]
+
+  - job_name: fulfillment-orchestrator-consumer
+    static_configs:
+      - targets: ["fulfillment-orchestrator-consumer:9104"]
+
+  - job_name: fulfillment-orchestrator-outbox-relay
+    static_configs:
+      - targets: ["fulfillment-orchestrator-outbox-relay:9105"]
