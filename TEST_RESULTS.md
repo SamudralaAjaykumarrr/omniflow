@@ -1,6 +1,6 @@
 # Test Results
 
-Last updated: 2026-07-24 (Phase 2 complete).
+Last updated: 2026-07-25 (Phase 4 complete).
 
 This file is updated after every phase with real output from real commands;
 no number here is ever estimated or invented (see `RISKS.md` #4).
@@ -288,3 +288,145 @@ brings up the entire real stack including the new observability services
   dashboard.
 - Scanned every background worker's logs plus the OTel Collector's logs
   for errors/exceptions/warnings after the full run — none found.
+
+### 2026-07-25 — Phase 4: Data engineering platform
+
+Commands run (via `docker run --rm ... mypy`, `docker compose run --rm
+spark-gold pytest --cov=app --cov-report=term-missing`, and a real `docker
+compose up`/`down -v` cycle against MinIO + Redpanda):
+
+**Type checking** (`make typecheck`): all six packages pass clean —
+`event_contracts` (8 files), `order-service/app` (14 files),
+`inventory-service/app` (14 files), `fulfillment-orchestrator/app` (18
+files), `api-gateway/app` (7 files), and (new this phase)
+`data-platform/app` (19 files).
+
+**data-platform** — 40 passed, 0 failed, 45% coverage (767 stmts, 423
+missed). Missing lines are almost entirely real-client/CLI-entrypoint code
+(`app/generator.py`, `app/lag_poller.py`, `app/gold/runner.py`'s `main`,
+most of `app/backfill.py`/`app/dq/report.py`'s I/O) exercised for real
+against MinIO/Redpanda in this phase's compose verification below, not in
+these no-broker-needed unit tests — same pattern every prior phase's
+real-Kafka-client code followed. Suites: `test_bronze.py` (3),
+`test_silver.py` (11 — parsing, validation incl. the per-row
+unknown-schema-version check, normalization, lateness marking, the
+on-time/late/invalid split, the real streaming `dropDuplicatesWithinWatermark`
+dedup primitive against a file source, and the deadletter
+`original_event`-as-nested-JSON regression), `test_gold.py` (9, one per
+streaming Gold dataset), `test_dq.py` (12, all five checks plus the report
+module's date-partition reader), `test_backfill.py` (4), `test_restart.py`
+(1, a real checkpoint-based restart-doesn't-reprocess proof against a file
+source).
+
+**Total: 167 passed, 0 failed** across the six suites (37 + 34 + 18 + 29 + 9
++ 40).
+
+Lint/format: `ruff check .` — all checks passed. `ruff format --check .` —
+130 files formatted, 0 remaining.
+
+**Real bugs found and fixed during this phase** (full writeup in
+`DECISIONS.md`), roughly in the order they surfaced running the real stack
+against MinIO with real traffic — none were visible from unit tests alone,
+since every one of them is a property of concurrent/real-storage execution:
+1. `DeadLetterEventDataV1.original_event` (Phase 2, `event_contracts`) is a
+   JSON *object*; Silver's Spark schema for it was `StringType`, so
+   `from_json` silently nulled it on every real dead-letter row. Fixed by
+   extracting it via `get_json_object` instead.
+2. `validate()`'s `unknown_schema_version` check compared the query's own
+   static `schema_version` parameter (always a registered value) instead of
+   each row's own `schema_version` column — permanently dead code that
+   could never fire for a real producer bug. Fixed to check the row's own
+   column against the registry.
+3. Structured Streaming's file source requires its source path to already
+   exist at query-start (`PATH_NOT_FOUND` otherwise) — Silver/Gold crashed
+   immediately on a genuinely fresh `docker compose up`, before
+   Bronze/Silver had ever written anything. Fixed with a hidden placeholder
+   object (`app.s3.ensure_prefix_exists`).
+4. Structured Streaming's partition-column auto-discovery resolves once, at
+   query-start, from whatever partition directories exist then — a query
+   started against an empty path resolves with zero partition columns, and
+   the first *real* `date=<Y>` directory appearing afterward broke the
+   query with a schema-mismatch assertion. Fixed by declaring `date`
+   explicitly in the schema for both Silver's Bronze-read and Gold's
+   Silver-read, instead of relying on auto-discovery.
+5. 11 concurrent Silver queries (one per event type) all wrote to one
+   shared output path with Spark's default rename-based commit protocol —
+   their `_temporary` staging directories collided against S3A/MinIO
+   (rename there is copy+delete, not atomic), surfacing as a real
+   `RemoteFileChangedException` that killed the query. Fixed by giving each
+   event type its own distinct output path (Gold's 9 datasets already had
+   this; added it for Silver and Silver's batch reprocessing).
+6. This MinIO version rejects S3's bulk `DeleteObjects` API
+   (`MissingContentMD5`) — `s3fs`'s `rm`/`mv` always route through it even
+   for a single key. Fixed `app.backfill`'s swap step to delete via
+   `boto3`'s single-object `delete_object` instead.
+7. Gold's live streaming queries wrote via `.writeStream.format("parquet")`
+   directly, which maintains a `_spark_metadata` sink commit log; any
+   metadata-aware batch reader (including a plain `spark.read.parquet()`)
+   only sees files recorded there, so `app.backfill`'s swap step wrote real,
+   correct files that were invisible to any normal read afterward. Fixed by
+   switching Gold to the same `foreachBatch` + plain-write pattern Silver
+   already used, which never creates that log.
+8. `build_spark_session`'s default was `local[2]`, contradicting ADR 0005's
+   own decision to run `local[*]` (all host cores). Under 11 (Silver) or 9
+   (Gold) genuinely concurrent streaming queries, Spark's default FIFO job
+   scheduler combined with too few cores let some queries starve of
+   scheduled time indefinitely, not just lag — order.created's Silver query
+   stopped making progress entirely under real generated traffic. Fixed by
+   correcting the default to `local[*]` (matching the ADR) and adding
+   `spark.scheduler.mode=FAIR`.
+9. `check_freshness` subtracted an aware `datetime.now(UTC)` from a naive
+   one — Spark's `TimestampType` collects as a naive Python `datetime` even
+   under `spark.sql.session.timeZone=UTC`, raising `TypeError` on real
+   Bronze data (caught by running the DQ report for real, not by the unit
+   tests, which happened not to exercise a real Spark-collected timestamp
+   difference against an aware value in this exact way before the fix
+   landed).
+
+**Compose verification** (`docker compose up -d --build`, a real MinIO +
+Redpanda + Bronze/Silver/Gold/lag-poller stack, `docker compose down -v`
+between iterations to prove a genuinely fresh environment starts clean):
+- Ran the unchanged Phase 1-3 `make smoke` end-to-end twice against this
+  same stack (once before, once after the scheduling fix) — both **PASS**,
+  confirming Phase 4's additions don't regress the real order lifecycle,
+  traces, or metrics.
+- Ran `python -m app.generator --orders 60 --dead-letters 4
+  --duplicate-rate 0.1 --late-rate 0.1` against the live stack — published
+  398-405 real events per run across 10 of the 11 topics (11th,
+  `inventory.low`, is a ~5%-probability event per order and didn't always
+  fire).
+- **Bronze**: real Parquet under `s3a://omniflow/bronze/event_type=<X>/date=<Y>/`
+  for all 11 event types (`order.cancelled` included only via a real Phase
+  1 smoke-test cancellation from earlier project history sitting in
+  Redpanda's persistent volume, replayed from `startingOffsets=earliest` —
+  itself a real, useful confirmation that Bronze correctly replays a
+  pre-existing backlog).
+- **Silver**: real validated/deduplicated Parquet per event type; 0 rows in
+  `silver_rejects` (no schema-invalid rows generated); real rows in
+  `late_events` for the events the generator deliberately backdated.
+- **Data-quality report** (`python -m app.dq.report`), run against the live
+  MinIO data for the current date: **overall PASS** —
+  `bronze_silver_reconciliation: 0` (every distinct Bronze `event_id`
+  accounted for as on-time, late, or rejected in Silver), `schema_rejection_rate:
+  0.0` (threshold 0.05), `duplicate_rate: 0.111` (informational — matches
+  the generator's injected 10% duplicate rate), `late_event_rate: 0.094`
+  (threshold 0.10), `freshness: ~2.1 minutes` (threshold 60). Report written
+  to `s3a://omniflow/dq-reports/date=<today>/report.json`.
+- **Backfill/reprocessing** (`python -m app.backfill gold --dataset ...
+  --apply`), run for real against live Silver data for all 9 streaming Gold
+  datasets — every one produced a real, non-zero row count and a
+  successful swap into the live path, subsequently readable:
+  `orders_per_minute` (1), `revenue_by_product_location` (59),
+  `fulfillment_success_rate` (2), `fulfillment_latency` (2),
+  `inventory_reservation_failure_rate` (1), `stockout_frequency` (11),
+  `late_order_rate` (2), `product_demand_by_window` (20),
+  `dead_letter_volume` (3). The 10th Gold dataset, `consumer_lag`
+  (`app.lag_poller`, polling every 15s independent of Spark), had 270 real
+  rows.
+- Noted, not a bug: the synthetic generator publishes onto the same Kafka
+  topics the real `order-service`/`fulfillment-orchestrator` consumers
+  subscribe to, so those real consumers also process the synthetic events —
+  observed as expected `404 Not Found` responses from `order-service` in
+  `fulfillment-orchestrator-consumer`'s logs (the synthetic order IDs don't
+  exist in Postgres) and correctly produced zero dead letters. Harmless
+  cross-topic noise, not a functional break; documented in `RISKS.md`.

@@ -5,6 +5,91 @@ architectural decisions get a full ADR under `docs/adrs/`; this log also
 captures smaller in-flight calls that don't warrant a standalone ADR, plus
 pointers to the ADRs when they do.
 
+## 2026-07-25 — Phase 4: Data engineering platform
+
+- Completed the Bronze/Silver/Gold pipeline that was already in progress
+  (uncommitted working tree at the start of this phase): all 10 Gold
+  datasets, `app.dq` (checks + report), `app.generator` (synthetic event
+  generator), and `app.backfill` (Silver/Gold reprocessing tooling) —
+  scoping DQ checks/reporting into this phase rather than a separate one,
+  since the working tree already had the Spark plumbing in place to build
+  on directly.
+- **Lateness is measured once, at Silver, not per-Gold-dataset.** Structured
+  Streaming doesn't expose a per-row "this was dropped for being late"
+  event from inside a windowed aggregation, so a valid row whose Bronze
+  `ingested_at` lagged its own `occurred_at` by more than 600s (matching
+  Silver's own dedup watermark) is routed to `late_events` instead of
+  Silver. This is deliberately not synced to each Gold dataset's own
+  watermark (10-30 minutes) — always at least as strict as the narrowest
+  one, so it can flag a row "late" that a wider-watermark dataset would
+  still have windowed successfully, but never the reverse. See
+  `docs/data-pipeline.md`'s "Watermarks and late data".
+- **Each Silver query writes to its own base path
+  (`silver_path/event_type=<X>`), not a shared path dynamically partitioned
+  by `event_type`.** 11 concurrent per-event-type streaming queries writing
+  to one shared output path hit a real `_temporary`-staging collision
+  against S3A/MinIO's non-atomic rename (`RemoteFileChangedException`,
+  killing the query) — caught running this for real against MinIO with
+  real generated traffic, not in unit tests, which only ever exercise one
+  query at a time. Gold's 9 datasets already had this property (each writes
+  to `gold_path/<name>`); Silver and Silver's own batch reprocessing
+  (`app.backfill.reprocess_silver`) were changed to match.
+- **Gold's live streaming queries write via `foreachBatch` + a plain
+  `DataFrame.write` call, not `.writeStream.format("parquet")` directly**
+  (a mid-phase change from how it was originally written). The latter uses
+  Structured Streaming's `FileStreamSink`, which maintains its own
+  `_spark_metadata` commit log — any metadata-aware batch reader (including
+  a plain `spark.read.parquet()`) only sees files recorded in that log, so
+  `app.backfill`'s swap step (which writes real Parquet files directly via
+  S3, bypassing the log) produced files that were physically present but
+  invisible to any normal read. Silver's writes never had this problem
+  (they were already `foreachBatch` + plain writes); switching Gold to the
+  same pattern fixes it at the root rather than trying to hand-roll
+  `_spark_metadata` updates, which is an internal, undocumented Spark
+  format not meant for external manipulation.
+- **`build_spark_session`'s default master is `local[*]`, matching ADR
+  0005 exactly — not `local[2]`, which is what the code actually shipped
+  with before this phase's testing caught the drift.** Running 11 (Silver)
+  or 9 (Gold) genuinely concurrent Structured Streaming queries against too
+  few cores, combined with Spark's default FIFO job scheduler, starved some
+  queries of scheduled time *indefinitely* under real generated load — not
+  merely lag, a query's batch counter stopped advancing entirely. Fixed by
+  correcting the default (aligning code with the ADR's already-stated
+  decision) and adding `spark.scheduler.mode=FAIR`, which round-robins job
+  slots across concurrently running queries instead of a strict FIFO order.
+- **Backfill/reprocessing deletes exclusively through `boto3`'s
+  single-object `delete_object`, never `s3fs`'s `rm`/`mv`.** This MinIO
+  version rejects S3's bulk `DeleteObjects` API (`MissingContentMD5`), and
+  `s3fs` routes *every* deletion through that endpoint internally,
+  regardless of how many keys are involved — including the delete inside
+  `mv`'s copy-then-delete. `boto3`'s single-object `DELETE` is a different,
+  simpler code path that doesn't hit this at all.
+- **The synthetic generator (`app.generator`) publishes directly onto the
+  real Kafka topics**, the same ones `order-service`/`inventory-service`/
+  `fulfillment-orchestrator`'s real consumers subscribe to — deliberately,
+  since Bronze has to consume the real event catalog either way and a
+  separate topic set would mean either duplicating all 11 topics or Bronze
+  subscribing to two names per event type. The tradeoff: running the
+  generator alongside the real stack makes those real consumers also
+  process synthetic events, visible as expected `404 Not Found` responses
+  in `fulfillment-orchestrator`'s logs when it looks up a synthetic,
+  nonexistent order ID. Confirmed harmless (zero dead letters produced,
+  no errors) but worth knowing before reading those logs and assuming
+  something is broken — see `RISKS.md`.
+- **Real bugs found and fixed while verifying this phase's own test suite
+  and running the real stack against MinIO** (full list with detail in
+  `TEST_RESULTS.md`): the `DeadLetterEventDataV1.original_event` dict/string
+  schema mismatch between `event_contracts` (Phase 2) and Silver's Spark
+  schema; `validate()`'s `unknown_schema_version` check comparing the
+  query's static parameter instead of each row's own `schema_version`
+  column (permanently dead code); Structured Streaming's `PATH_NOT_FOUND`
+  on a genuinely fresh environment; partition-column auto-discovery
+  freezing before real dated data exists; the concurrent-writer/committer,
+  bulk-delete, `_spark_metadata`, and scheduler-starvation issues above; and
+  a naive-vs-aware `datetime` subtraction in `check_freshness` (Spark's
+  `TimestampType` collects as naive Python `datetime`s even under
+  `spark.sql.session.timeZone=UTC`).
+
 ## 2026-07-23 — Planning stage
 
 - Chose Redpanda over Apache Kafka for the event platform. See

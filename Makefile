@@ -1,5 +1,6 @@
 .PHONY: demo up down reset logs migrate test test-contracts test-order test-inventory test-gateway \
-	test-orchestrator smoke replay lint format format-check typecheck
+	test-orchestrator test-data-platform smoke replay generate dq-report backfill lint format \
+	format-check typecheck
 
 COMPOSE := docker compose
 RUFF := python:3.12-slim
@@ -22,6 +23,7 @@ demo: up
 	@echo "  Jaeger UI            -> http://localhost:16686"
 	@echo "  Prometheus           -> http://localhost:9090"
 	@echo "  Grafana              -> http://localhost:3000 (anonymous admin access)"
+	@echo "  MinIO Console        -> http://localhost:9001 (data lake: bronze/silver/gold)"
 
 up:
 	$(COMPOSE) up --build -d
@@ -45,7 +47,7 @@ migrate:
 	$(COMPOSE) run --rm fulfillment-orchestrator alembic upgrade head
 
 ## Run every service's test suite against its dedicated *_test database.
-test: test-contracts test-order test-inventory test-orchestrator test-gateway
+test: test-contracts test-order test-inventory test-orchestrator test-gateway test-data-platform
 
 ## Shared event-contracts package: schemas, envelope, Kafka helpers, consume-loop retry/DLQ logic.
 ## httpx is test-only (starlette.testclient, used by test_metrics_setup.py's
@@ -78,6 +80,16 @@ test-gateway:
 	$(COMPOSE) build api-gateway
 	$(COMPOSE) run --rm api-gateway pytest --cov=app --cov-report=term-missing
 
+## Bronze/Silver/Gold Spark jobs, DQ checks, synthetic generator, backfill
+## tooling. No live Kafka/MinIO needed for its own suite — every test runs
+## a local Spark session against static/file data, not the real stack — so
+## unlike the other test-* targets, this doesn't need `up -d` first. Any of
+## the four data-platform compose services share the same image/Dockerfile;
+## spark-gold is used here only as a stand-in to run pytest.
+test-data-platform:
+	$(COMPOSE) build spark-gold
+	$(COMPOSE) run --rm spark-gold pytest --cov=app --cov-report=term-missing
+
 ## End-to-end smoke test against the real running stack (Postgres, Redpanda,
 ## every service, both outbox relays, the validator consumer, and the saga
 ## consumer) — creates a real order and polls until it reaches SHIPPED.
@@ -87,6 +99,24 @@ smoke:
 ## Replay dead-lettered events. Usage: make replay ARGS="--all" or ARGS="--id <uuid>"
 replay:
 	$(COMPOSE) run --rm fulfillment-orchestrator python -m app.replay $(ARGS)
+
+## Generate synthetic order-lifecycle traffic onto Kafka, for exercising
+## the data platform without a live order moving through the real saga.
+## Usage: make generate ARGS="--orders 200 --dead-letters 5 --seed 1"
+generate:
+	$(COMPOSE) run --rm spark-gold python -m app.generator $(ARGS)
+
+## Run data-quality checks for one date (default: today, UTC) against the
+## real Bronze/Silver/late-events/rejects Parquet and write a report to
+## MinIO. Usage: make dq-report ARGS="--date 2026-07-25"
+dq-report:
+	$(COMPOSE) run --rm spark-gold python -m app.dq.report $(ARGS)
+
+## Backfill/reprocess Silver (from Bronze) or Gold (from Silver) over a
+## bounded date range; add --apply to swap into the live path.
+## Usage: make backfill ARGS="silver --event-type order.created --from-date 2026-07-25 --to-date 2026-07-25"
+backfill:
+	$(COMPOSE) run --rm spark-gold python -m app.backfill $(ARGS)
 
 ## Lint/format run in a throwaway container — no host Python toolchain is assumed (see PROJECT_STATUS.md).
 lint:
@@ -113,9 +143,11 @@ typecheck:
 		pip install --quiet mypy==1.11.2 \
 			pydantic==2.9.2 pydantic-settings==2.5.2 sqlalchemy==2.0.35 \
 			fastapi==0.115.0 httpx==0.27.2 confluent-kafka==2.5.3 \
-			opentelemetry-api==1.27.0 prometheus-client==0.21.0 && \
+			opentelemetry-api==1.27.0 prometheus-client==0.21.0 \
+			pyspark==3.5.3 pyarrow==17.0.0 s3fs==2024.9.0 && \
 		(cd services/event-contracts && mypy --ignore-missing-imports event_contracts) && \
 		(cd services/order-service && mypy --ignore-missing-imports app) && \
 		(cd services/inventory-service && mypy --ignore-missing-imports app) && \
 		(cd services/fulfillment-orchestrator && mypy --ignore-missing-imports app) && \
-		(cd services/api-gateway && mypy --ignore-missing-imports app)"
+		(cd services/api-gateway && mypy --ignore-missing-imports app) && \
+		(cd services/data-platform && mypy --ignore-missing-imports app)"

@@ -1,11 +1,12 @@
 # Project Status
 
-Last updated: 2026-07-24 (Phase 3 complete).
+Last updated: 2026-07-25 (Phase 4 complete).
 
 ## Current phase
 
-**Phase 3 (Observability) complete and verified.** Phase 4 (Data engineering
-platform) not yet started.
+**Phase 4 (Data engineering platform) complete and verified.** Data quality
+checks/reporting (originally slotted as a separate Phase 5) were folded into
+this phase — see below. Phase 6 (Demand forecasting) not yet started.
 
 ## Phase progress
 
@@ -15,8 +16,8 @@ platform) not yet started.
 | 1. Core domain | **Done** | Postgres + Alembic, Order Service, Inventory Service, API Gateway — see `TEST_RESULTS.md` |
 | 2. Event platform | **Done** | Redpanda, outbox relays, event-contracts Kafka helpers, order-service validator consumer, fulfillment-orchestrator saga (node scoring, payment sim, compensation, retry+jitter, DLQ, replay) — see below and `TEST_RESULTS.md` |
 | 3. Observability | **Done** | Structured JSON logs w/ correlation IDs, OpenTelemetry distributed tracing (Jaeger, cross-Kafka-hop trace propagation), Prometheus metrics (every service + every background worker), Grafana dashboard, mypy type checking — see below and `TEST_RESULTS.md` |
-| 4. Data engineering platform | Not started | Spark bronze/silver/gold into MinIO |
-| 5. Data quality | Not started | Executable checks + report |
+| 4. Data engineering platform | **Done** | Spark bronze/silver/gold into MinIO, synthetic generator, backfill/reprocessing tooling — see below and `TEST_RESULTS.md` |
+| 5. Data quality | **Done** | Executable checks + report — folded into Phase 4 (`app.dq`), see below |
 | 6. Demand forecasting | Not started | Synthetic data, baseline + secondary model |
 | 7. Ops dashboard | Not started | React + TypeScript, 10 screens |
 | 8. Failure laboratory | Not started | 10 deterministic failure scenarios |
@@ -122,24 +123,62 @@ restated at the top of each phase's own PR/commit as it lands.
     not-safely-rerunnable bugs (hardcoded fulfillment-node name and
     customer email collided with a previous run's rows on a persistent
     dev DB volume)
-- 127 passing tests across five suites (event-contracts, order-service,
-  inventory-service, fulfillment-orchestrator, api-gateway) — see
-  `TEST_RESULTS.md` for the full breakdown.
+- **Phase 4 application code:**
+  - `services/data-platform` — **new service** (Spark Structured Streaming,
+    `local[*]` per ADR 0005):
+    - `app/bronze.py` — Kafka (all 11 event-catalog topics) -> raw Parquet,
+      partitioned `event_type`/`date`, loosely-typed payload
+    - `app/silver.py`/`app/silver_io.py` — one streaming query per event
+      type: schema validation (quarantines to `silver_rejects` with a
+      reason), `dropDuplicatesWithinWatermark` dedup, lateness detection
+      (routes to `late_events`), each event type writing to its own base
+      path (`app/backfill.py`'s Silver reprocessing matches)
+    - `app/gold/` — all 10 Gold datasets from `docs/data-pipeline.md`'s
+      table: 9 streaming aggregations (`app/gold/queries.py`,
+      `app/gold/runner.py`, `foreachBatch` + plain writes) plus consumer-group
+      lag (`app/lag_poller.py`, direct Kafka polling, no Spark)
+    - `app/dq/checks.py`/`app/dq/report.py` — Bronze-vs-Silver
+      reconciliation, schema-rejection-rate, duplicate-rate,
+      late-event-rate, and freshness checks, run against one date's real
+      Parquet and written as a JSON report to `dq-reports/`
+    - `app/generator.py` — synthetic order-lifecycle event generator
+      (schema-validated against `event_contracts.schemas`), with
+      configurable duplicate/late injection for exercising Silver's
+      dedup/late-event paths end-to-end
+    - `app/backfill.py` — Silver (from Bronze) / Gold (from Silver) batch
+      reprocessing over a bounded date range, side-path + row-count
+      validation + swap into the live path
+    - `app/s3.py` — shared s3fs/boto3 helpers (`ensure_prefix_exists` for
+      Structured Streaming's fresh-environment/partition-discovery
+      requirements, `boto3_client` for deletes this MinIO version's bulk
+      `DeleteObjects` API rejects)
+  - `infra/docker/minio/create-buckets.sh` — idempotent bucket + prefix
+    layout (`bronze`/`silver`/`silver_rejects`/`late_events`/`gold`/
+    `checkpoints`/`dq-reports`)
+  - `docker-compose.yml` — `minio`, `minio-init`, `spark-bronze`,
+    `spark-silver`, `spark-gold`, `lag-poller` services added
+  - `Makefile` — `test-data-platform`, `generate`, `dq-report`, `backfill`
+    targets added; `typecheck` extended to `services/data-platform/app`
+- 167 passing tests across six suites (event-contracts, order-service,
+  inventory-service, fulfillment-orchestrator, api-gateway, data-platform)
+  — see `TEST_RESULTS.md` for the full breakdown.
 
 ## Environment notes (relevant to every future phase)
 
 Host has Docker 29.6.2 + Compose v5.3.1, 8 CPUs, 15Gi RAM, ~950G disk. No
 host-installed Python packages (pip absent), no Node/npm, no Java, no
 Terraform — all builds/tests/lint run inside containers. See ADRs 0001, 0005,
-0007 for how this shaped the design. Confirmed workable again in Phase 3:
-Redpanda plus Postgres plus 4 FastAPI services plus 5 background workers
-plus the full observability stack (Jaeger, OTel Collector, Prometheus,
-Grafana) — 17 containers total — all ran concurrently on this host without
-resource issues (`docker compose ps` all healthy, real end-to-end smoke
-test passed).
+0007 for how this shaped the design. Confirmed workable again in Phase 4:
+the full Phase 1-3 stack plus MinIO plus Bronze/Silver/Gold/lag-poller — 23
+containers total — ran concurrently on this host without OOM
+(`docker compose ps` all healthy, real end-to-end smoke test and Phase 4
+generator/DQ/backfill verification both passed against a genuinely fresh
+`docker compose up`). Running Silver's 11 and Gold's 9 concurrent Structured
+Streaming queries did need a real fix (`local[*]` + `spark.scheduler.mode=
+FAIR`, see `RISKS.md` #16) — under-provisioned Spark parallelism starved
+individual queries outright, not just slowed them down.
 
 ## Next action
 
-Begin Phase 4: Data engineering platform (Spark Structured Streaming
-bronze/silver/gold pipeline into MinIO), per `docs/data-pipeline.md` and
-ADR 0005 (single-node `local[*]` Spark).
+Begin Phase 6: Demand forecasting (synthetic data, baseline + secondary
+model), per ADR 0006. Phase 5 (Data quality) is done, folded into Phase 4.
