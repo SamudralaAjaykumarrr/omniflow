@@ -169,6 +169,14 @@ make reset        # tear down containers and volumes for a clean slate
 make logs         # tail all service logs
 ```
 
+## Project Screenshots
+
+![Grafana dashboard](docs/images/grafana-dashboard.png)
+
+![Jaeger trace](docs/images/jaeger-trace.png)
+
+![Swagger API](docs/images/swagger-api.png)
+
 ## Important service URLs
 
 Available once `make demo` reports all services healthy:
