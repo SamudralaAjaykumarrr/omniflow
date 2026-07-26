@@ -9,3 +9,10 @@ pydantic-settings==2.5.2
 prometheus-client==0.21.0
 pytest==8.3.3
 pytest-cov==5.0.0
+# Phase 6 (demand forecasting) — pure-Python-wheel, no extra system
+# toolchain (ADR 0006): pandas/numpy for feature engineering, scikit-learn
+# for the secondary model, joblib for local model-artifact persistence.
+pandas==2.2.3
+numpy==2.1.2
+scikit-learn==1.5.2
+joblib==1.4.2

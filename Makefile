@@ -2,7 +2,10 @@
 	test-orchestrator test-data-platform smoke replay generate dq-report backfill lint format \
 	format-check typecheck coverage security docker-validate docker-build pre-commit ci \
 	streaming-up streaming-down inspect-bronze inspect-bronze-rejects inspect-silver \
-	inspect-silver-rejects inspect-late-events inspect-gold phase6-smoke phase6-validate clean-phase6
+	inspect-silver-rejects inspect-late-events inspect-gold phase6-smoke phase6-validate clean-phase6 \
+	forecast-generate-data forecast-prepare forecast-train-baseline forecast-train-model \
+	forecast-evaluate forecast-select forecast-run forecast-inspect forecast-test forecast-smoke \
+	forecast-clean-safe forecast-validate
 
 COMPOSE := docker compose
 RUFF := python:3.12-slim
@@ -197,6 +200,64 @@ clean-phase6:
 		services/data-platform/.ruff_cache
 	find services/data-platform -type d -name __pycache__ -exec rm -rf {} +
 
+# --- Phase 6 (the actual roadmap phase): demand forecasting ---------------
+# `app.forecasting` is a pandas/scikit-learn batch pipeline (no Spark/JVM
+# session needed) that lives inside the data-platform package/image; every
+# target below reuses the already-built spark-gold image/container as its
+# runner, same as app.generator/app.dq.report/app.backfill above. Default
+# paths (no ARGS override) read/write real MinIO under
+# s3a://<bucket>/forecasting/... — see docs/phase-6-demand-forecasting.md.
+
+## Generate deterministic synthetic demand history. Usage: make forecast-generate-data ARGS="--output s3a://omniflow/forecasting/synthetic_history/history.parquet"
+forecast-generate-data:
+	$(COMPOSE) run --rm spark-gold python -m app.forecasting.cli generate-history $(ARGS)
+
+## Build the feature-engineered forecasting dataset (grain: SKU x location x date) from synthetic history.
+forecast-prepare:
+	$(COMPOSE) run --rm spark-gold python -m app.forecasting.cli prepare $(ARGS)
+
+## Train the seasonal-naive baseline. Usage: make forecast-train-baseline ARGS="--run-id my-run"
+forecast-train-baseline:
+	$(COMPOSE) run --rm spark-gold python -m app.forecasting.cli train-baseline $(ARGS)
+
+## Train the HistGradientBoostingRegressor secondary model. Usage: make forecast-train-model ARGS="--run-id my-run"
+forecast-train-model:
+	$(COMPOSE) run --rm spark-gold python -m app.forecasting.cli train-secondary $(ARGS)
+
+## Evaluate baseline + secondary against the chronological validation split. Usage: make forecast-evaluate ARGS="--run-id my-run"
+forecast-evaluate:
+	$(COMPOSE) run --rm spark-gold python -m app.forecasting.cli evaluate $(ARGS)
+
+## Select the champion model from measured evaluation metrics (never a hardcoded winner). Usage: make forecast-select ARGS="--run-id my-run"
+forecast-select:
+	$(COMPOSE) run --rm spark-gold python -m app.forecasting.cli select $(ARGS)
+
+## Run the full local forecasting pipeline end to end: generate -> prepare -> train baseline + secondary -> evaluate -> select -> future forecast.
+forecast-run:
+	$(COMPOSE) run --rm spark-gold python -m app.forecasting.cli run $(ARGS)
+
+## Inspect forecast output, evaluation metrics, champion selection, or the prepared dataset. Usage: make forecast-inspect ARGS="forecast"
+forecast-inspect:
+	$(COMPOSE) run --rm spark-gold python -m app.forecasting.cli inspect $(ARGS)
+
+## Run the forecasting unit + pipeline test suite only (pure pandas/scikit-learn — no live Kafka/MinIO needed; the full suite already runs these via test-data-platform).
+forecast-test:
+	$(COMPOSE) build spark-gold
+	$(COMPOSE) run --rm spark-gold pytest tests/forecasting -v
+
+## End-to-end forecasting smoke test: small deterministic history -> dataset -> both models -> evaluation -> champion -> future forecast -> inspect, entirely local (redirected away from MinIO — no live stack needed).
+forecast-smoke:
+	bash scripts/forecast_smoke_test.sh
+
+## Remove disposable local forecasting output only (local model artifacts + the local smoke-test scratch dir) — never touches MinIO, Docker volumes, checkpoints, or any Bronze/Silver/Gold data.
+## Runs via a throwaway container (not a bare host `rm -rf`): both dirs are written by spark-gold's container user (root), so a host-user `rm` would hit "Permission denied" — this avoids needing sudo.
+forecast-clean-safe:
+	docker run --rm -v $(CURDIR)/services/data-platform:/target $(PY_TEST_IMAGE) \
+		rm -rf /target/forecasting_artifacts /target/.forecast_smoke_output
+
+## Everything that gates Phase 6 (demand forecasting) as done: unit/pipeline tests, the smoke test, and the existing project CI gate.
+forecast-validate: forecast-test forecast-smoke ci
+
 ## Lint/format run in a throwaway container — no host Python toolchain is assumed (see PROJECT_STATUS.md).
 lint:
 	docker run --rm -v $(CURDIR):/repo -w /repo $(RUFF) sh -c "pip install --quiet ruff==$(RUFF_VERSION) && ruff check ."
@@ -225,7 +286,8 @@ typecheck:
 			pydantic==2.9.2 pydantic-settings==2.5.2 sqlalchemy==2.0.35 \
 			fastapi==0.115.0 httpx==0.27.2 confluent-kafka==2.5.3 \
 			opentelemetry-api==1.27.0 prometheus-client==0.21.0 \
-			pyspark==3.5.3 pyarrow==17.0.0 s3fs==2024.9.0 && \
+			pyspark==3.5.3 pyarrow==17.0.0 s3fs==2024.9.0 \
+			pandas==2.2.3 numpy==2.1.2 scikit-learn==1.5.2 joblib==1.4.2 && \
 		(cd services/event-contracts && mypy --config-file=/repo/pyproject.toml event_contracts) && \
 		(cd services/order-service && mypy --config-file=/repo/pyproject.toml app) && \
 		(cd services/inventory-service && mypy --config-file=/repo/pyproject.toml app) && \

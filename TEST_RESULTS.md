@@ -1,7 +1,6 @@
 # Test Results
 
-Last updated: 2026-07-26 (Phase 6, Streaming data-platform hardening,
-complete).
+Last updated: 2026-07-26 (Phase 6, Demand forecasting, complete).
 
 This file is updated after every phase with real output from real commands;
 no number here is ever estimated or invented (see `RISKS.md` #4).
@@ -636,3 +635,136 @@ After the watermark fix + `app.backfill --apply` recovery: `value=0`,
 `overall: PASS`. Regression test:
 `tests/test_silver.py::test_dedup_watermark_on_ingested_at_survives_wide_occurred_at_swings`
 — passing.
+
+### 2026-07-26 — Phase 6: Demand forecasting (the actual roadmap phase)
+
+Branch `phase-6-demand-forecasting` — see
+`docs/phase-6-demand-forecasting.md`. All commands below actually ran in
+this session against real containers; no number is estimated (`RISKS.md`
+#4). Distinct from the "Phase 6: Streaming data-platform hardening" section
+above, which reused the number "Phase 6" in its own branch name by
+coincidence.
+
+**Forecasting unit + pipeline tests** (`make forecast-test`, scoped to
+`tests/forecasting/`, no live Kafka/MinIO needed): **91 passed, 0 failed**
+— `test_synthetic.py` (10), `test_features.py` (10), `test_quality.py`
+(17), `test_splits.py` (7), `test_baseline.py` (6), `test_secondary_model.py`
+(6), `test_metrics.py` (8), `test_select.py` (4), `test_artifacts.py` (5),
+`test_dataset.py` (4), `test_evaluate.py` (4), `test_forecast.py` (3),
+`test_io.py` (4), `test_cli.py` (3).
+
+**Full six-suite test run** (`make coverage`, which runs `make test`
+first): **272 passed, 0 failed, 0 skipped** (37 event-contracts + 34
+order-service + 18 inventory-service + 29 fulfillment-orchestrator + 9
+api-gateway + **145 data-platform** — up from 54 in the streaming-hardening
+pass; the 91 new tests are entirely `tests/forecasting/`, picked up
+automatically by `test-data-platform`'s existing `pytest` invocation, no
+Makefile change needed for that target itself).
+
+**Combined coverage** (`coverage combine` across all six suites):
+
+| Suite | Stmts | Miss | Cover |
+|---|---|---|---|
+| event-contracts | 321 | 41 | 87% |
+| order-service | 525 | 48 | 91% |
+| inventory-service | 469 | 33 | 93% |
+| api-gateway | 149 | 10 | 93% |
+| fulfillment-orchestrator | 762 | 294 | 61% |
+| data-platform | 1715 | 622 | 64% |
+| **TOTAL** | **3943** | **1048** | **73.4%** |
+
+`COV_THRESHOLD := 65` — passes (`coverage report --fail-under=65` exit 0).
+Combined coverage rose from 71.1% (streaming-hardening pass) to 73.4%: the
+new `app/forecasting/` package is almost entirely covered by pure
+pandas/scikit-learn unit tests (`artifacts.py`/`baseline.py`/`evaluate.py`/
+`features.py`/`forecast.py`/`metrics.py`/`secondary_model.py`/`select.py`/
+`synthetic.py` all 100%; `dataset.py` 95%, `quality.py` 95%, `splits.py`
+98%, `config.py` 92%; `cli.py` 55% and `paths.py` 39% — the CLI's own
+argument-wiring/path-building lines are exercised by `test_cli.py`'s
+end-to-end `cmd_run` test and the real smoke test below, not by every
+individual branch, the same pattern this suite already accepts for
+`app/generator.py`/`app/gold/runner.py`/`app/lag_poller.py`, which need a
+live Kafka/MinIO/Spark stack to exercise and are covered by `make
+forecast-smoke`/`make phase6-smoke` instead of unit tests).
+
+**Formatting** (`ruff format --check .`): 167 files, all formatted.
+
+**Lint** (`ruff check .`): all checks passed (0 errors).
+
+**Type checking** (`make typecheck`): all six packages pass clean —
+`data-platform/app` now 38 source files (up from 21), including the new
+`app/forecasting/` package; `pandas`/`numpy`/`scikit-learn`/`joblib` added
+to `typecheck`'s pinned pip-install list (matching
+`services/data-platform/requirements.txt`) so mypy resolves the same
+versions the real image uses, not whatever pyarrow/pyspark happen to pull
+in transitively — a real, found-by-running-it gap (the first `make
+typecheck` run without this fix produced 7 numpy-stub errors in
+`synthetic.py` from a mismatched transitive numpy version; fixed by
+pinning, not by silencing).
+
+**Pre-commit** (`make pre-commit`, `--all-files`): `trailing-whitespace`,
+`end-of-file-fixer`, `check-merge-conflict`, `check-added-large-files`,
+`check-yaml`, `check-json`, `check-toml`, `detect-private-key`,
+`mixed-line-ending`, `ruff`, `ruff-format` — all Passed.
+
+**Security** (`make security`): `bandit -ll` — 0 medium, 0 high across
+7,538 scanned lines (30 low-severity informational, same pre-existing
+shape — no new medium/high introduced by `app/forecasting/`).
+`pip-audit --strict` (adds `pandas==2.2.3`, `numpy==2.1.2`,
+`scikit-learn==1.5.2`, `joblib==1.4.2` to data-platform's
+`requirements.txt`): `No known vulnerabilities found` on all six scan
+targets — data-platform reports "2 ignored" (its own pre-existing
+`pytest`/`pyarrow` accepted IDs; the four new forecasting dependencies
+introduced no new CVE).
+
+**Docker Compose validation** (`make docker-validate`): valid — including
+the new `spark-gold` bind mount for `forecasting_artifacts` (section H's
+local model-persistence requirement).
+
+**Docker image builds** (`make docker-build`): `order-service`,
+`inventory-service`, `fulfillment-orchestrator`, `api-gateway`,
+`spark-gold` (data-platform, rebuilt with `pandas`/`numpy`/
+`scikit-learn`/`joblib` + the `app/forecasting/` package) — all built
+successfully.
+
+**`make ci`**: exit 0 ("all Phase 5 quality gates passed" — the target's
+own long-standing echo string, unrelated to this phase's number).
+
+**Forecasting smoke test** (`make forecast-smoke` /
+`scripts/forecast_smoke_test.sh`, small deterministic config — seed 99, 4
+SKUs x 2 locations, 2025-01-01..2025-06-30, 7-day horizon — every CLI
+subcommand run separately, entirely local, no live MinIO needed): **PASS**,
+run twice for a determinism check, both runs producing byte-identical
+measured metrics:
+
+```
+seasonal_naive:          {"mae": 18.446428571428573, "rmse": 62.02404487662138, "wape": 0.29786620530565167}
+hist_gradient_boosting:  {"mae": 9.515713349608854,  "rmse": 13.49209166350842, "wape": 0.15365627092793996}
+champion: hist_gradient_boosting (wape 0.1537 < seasonal_naive wape 0.2979)
+forecast: 56 rows (7 horizon days x 4 SKUs x 2 locations), all predicted_units >= 0
+```
+
+Reported honestly, not fabricated to look good: on this run's synthetic
+data, the secondary model (`HistGradientBoostingRegressor`) genuinely beat
+the seasonal-naive baseline on every metric (MAE, RMSE, and WAPE), and was
+selected champion by the documented rule using the measured WAPE values —
+not a hardcoded "the fancier model always wins."
+
+Also verified directly (separate from the smoke test, cross-container
+artifact persistence — section H's local-artifact requirement): trained a
+baseline and secondary model in two separate `docker compose run`
+invocations (each a fresh container), then loaded and evaluated both
+models in two further separate invocations — real persistence via the
+`spark-gold` service's bind-mounted `forecasting_artifacts` volume, not
+assumed.
+
+**Real bug found and fixed, with a regression test written specifically to
+catch it** (`RISKS.md` #23, `DECISIONS.md`): the recursive multi-step
+future-forecast rollout initially wrote each step's predictions back into
+the working series by position, assuming two independently-sorted
+DataFrames shared the same row order — they don't, in general. Found by
+`tests/forecasting/test_forecast.py::
+test_generate_future_forecast_recursion_feeds_predictions_forward`'s
+`_Lag1Model` probe (asserts step 2's prediction exactly equals step 1's)
+before this ever shipped. Fixed by keying predictions to `(sku,
+location_id)` explicitly; the same test now passes.

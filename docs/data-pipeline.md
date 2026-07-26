@@ -60,7 +60,7 @@ semantics it needs — most are append-only rollups, a couple need upsert-by-key
 | Inventory reservation failure rate | `inventory.reserved` vs `inventory.rejected` | rejected / (reserved + rejected), 1-hour window |
 | Stockout frequency | `inventory.rejected` | count by `sku` (not `sku, node_id` — the real `inventory.rejected` payload evaluates a rejection across all candidate nodes, not attributed to one; see `app.gold.queries` module docstring), 1-hour window |
 | Late-order rate | `order.shipped` vs `fulfillment.assigned.estimated_ship_date` | count where actual > estimate, 1-hour window |
-| Product demand by time window | `order.created` items | qty summed by `sku` (not `sku, node_hint` — the real `order.created` item payload has no `node_hint` field; see `app.gold.queries` module docstring), 15-min tumbling window (feeds forecasting) |
+| Product demand by time window | `order.created` items | qty summed by `sku` (not `sku, node_hint` — the real `order.created` item payload has no `node_hint` field; see `app.gold.queries` module docstring), 15-min tumbling window (originally scoped to feed forecasting — as built in Phase 6, `app.forecasting` reads a deterministic synthetic history instead, precisely because this dataset has no location dimension to build a SKU x location grain from; see `docs/phase-6-demand-forecasting.md`) |
 | Dead-letter volume | `deadletter.event` | count by `event_type, failed_consumer`, 1-hour window |
 | Consumer processing lag | Kafka consumer-group offsets, polled directly (`app.lag_poller`, independent of Spark — see that module's docstring for why) | max(latest_offset − committed_offset) by topic/consumer group |
 

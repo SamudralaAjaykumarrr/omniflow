@@ -36,7 +36,7 @@ jobs:
       - name: Build devtools image (coverage/security/pre-commit)
         run: make setup-dev
 
-      - name: Test + coverage (167 tests, six suites, coverage.xml)
+      - name: Test + coverage (272 tests, six suites, coverage.xml)
         run: make coverage
 
       - name: Upload coverage.xml

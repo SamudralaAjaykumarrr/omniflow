@@ -58,6 +58,15 @@ class Settings(BaseSettings):
     def checkpoints_path(self) -> str:
         return f"s3a://{self.data_lake_bucket}/checkpoints"
 
+    @property
+    def forecasting_path(self) -> str:
+        """Root prefix for Phase 6 demand-forecasting artifacts (synthetic
+        history, prepared dataset, forecast output) — a new top-level prefix
+        alongside bronze/silver/gold/dq-reports, not nested under gold,
+        since it isn't a Spark streaming aggregation like the other ten
+        Gold datasets. See docs/phase-6-demand-forecasting.md."""
+        return f"s3a://{self.data_lake_bucket}/forecasting"
+
 
 @lru_cache
 def get_settings() -> Settings:
