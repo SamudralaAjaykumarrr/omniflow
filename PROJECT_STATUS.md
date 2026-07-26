@@ -1,12 +1,24 @@
 # Project Status
 
-Last updated: 2026-07-25 (Phase 4 complete).
+Last updated: 2026-07-25 (Phase 4 complete; Engineering-quality work landed
+on top — see note below).
 
 ## Current phase
 
 **Phase 4 (Data engineering platform) complete and verified.** Data quality
 checks/reporting (originally slotted as a separate Phase 5) were folded into
 this phase — see below. Phase 6 (Demand forecasting) not yet started.
+
+**Engineering-quality tooling** (branch `phase-5-engineering-quality`) has
+also landed: a measured test-coverage threshold + `coverage.xml`, zero-cost
+security scanning (bandit + pip-audit), pre-commit hygiene hooks, and a
+GitHub Actions CI workflow. This branch's name collides with the table's
+existing "Phase 5" below by coincidence — it isn't that phase, and the
+table isn't renumbered for it. It's a slice pulled forward from three later
+phases' scope (coverage tooling from Phase 10, dependency/SAST scanning
+from part of Phase 9, CI from Phase 12) — none of those phases are marked
+Done below, since their full scope (JWT/RBAC, load-test tooling, etc.)
+isn't covered by this slice. Full detail: `docs/phase-5-engineering-quality.md`.
 
 ## Phase progress
 
@@ -21,10 +33,10 @@ this phase — see below. Phase 6 (Demand forecasting) not yet started.
 | 6. Demand forecasting | Not started | Synthetic data, baseline + secondary model |
 | 7. Ops dashboard | Not started | React + TypeScript, 10 screens |
 | 8. Failure laboratory | Not started | 10 deterministic failure scenarios |
-| 9. Security hardening | Not started | JWT/RBAC finalization, scanning configs, audit events |
-| 10. Testing completion + load test | Not started | Coverage threshold, load test tooling |
+| 9. Security hardening | Partially pulled forward | Dependency/SAST scanning (bandit + pip-audit) done — see `docs/phase-5-engineering-quality.md`; JWT/RBAC finalization, audit events still not started |
+| 10. Testing completion + load test | Partially pulled forward | Coverage threshold (65%, measured 71.6%) + `coverage.xml` done — see `docs/phase-5-engineering-quality.md`; load test tooling still not started |
 | 11. AWS infrastructure (Terraform) | Not started | Authored + validated, never applied |
-| 12. CI/CD | Not started | GitHub Actions workflows |
+| 12. CI/CD | Partially pulled forward | `.github/workflows/ci.yml` authored and its steps verified locally via `make ci`; not yet exercised by an actual GitHub-hosted run — see `docs/phase-5-engineering-quality.md` |
 | 13. Documentation & career deliverables | Not started | Remaining docs, final review |
 
 Full phase scope and acceptance criteria: `docs/architecture.md` (diagrams) and
@@ -162,6 +174,24 @@ restated at the top of each phase's own PR/commit as it lands.
 - 167 passing tests across six suites (event-contracts, order-service,
   inventory-service, fulfillment-orchestrator, api-gateway, data-platform)
   — see `TEST_RESULTS.md` for the full breakdown.
+- **Engineering-quality tooling** (branch `phase-5-engineering-quality`,
+  see `docs/phase-5-engineering-quality.md` for full detail):
+  - `infra/docker/devtools/Dockerfile` — shared pinned image (ruff, mypy,
+    pytest, coverage, bandit, pip-audit, pre-commit), built via
+    `make setup-dev`
+  - `Makefile` — `help`, `coverage` (combines all six suites' coverage data
+    into root `coverage.xml`, enforces `COV_THRESHOLD := 65`, measured
+    71.6%), `security` (bandit + pip-audit), `docker-validate`,
+    `docker-build`, `pre-commit`, `ci` (runs all of the above in order)
+  - `.pre-commit-config.yaml` — hygiene hooks + ruff, validated via
+    `make pre-commit`
+  - `.github/workflows/ci.yml` — GitHub Actions, standard free
+    `ubuntu-latest` runner, mirrors `make ci` job-for-job
+  - `RISKS.md` #20 — 14 real CVEs found by `pip-audit`'s first run; 5
+    (`pip`) fixed outright (`pip==26.1.2` pinned in every Dockerfile), 9
+    accepted with individual justification (`starlette`'s fixes need a
+    `fastapi` major-version bump verified incompatible with the current
+    pin; `pytest`/`pyarrow`'s don't apply to how this codebase uses them)
 
 ## Environment notes (relevant to every future phase)
 
@@ -182,3 +212,7 @@ individual queries outright, not just slowed them down.
 
 Begin Phase 6: Demand forecasting (synthetic data, baseline + secondary
 model), per ADR 0006. Phase 5 (Data quality) is done, folded into Phase 4.
+Engineering-quality tooling (this document's separate note above) is also
+done for the slice it covers; JWT/RBAC (rest of Phase 9), load-test tooling
+(rest of Phase 10), an actual GitHub-hosted CI run (rest of Phase 12), and
+Terraform (Phase 11) remain untouched.

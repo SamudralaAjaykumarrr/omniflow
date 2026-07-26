@@ -1,0 +1,60 @@
+# Phase 5 engineering-quality CI gate. Runs the exact same `make` targets a
+# contributor runs locally (see root Makefile) — no logic lives only in this
+# file, so "green in CI" and "green locally" can't drift apart. Every step
+# runs inside Docker on the standard free GitHub-hosted `ubuntu-latest`
+# runner (Docker + Compose v2 preinstalled); nothing here provisions cloud
+# infrastructure, uses paid runners, or needs secrets/credentials.
+name: CI
+
+on:
+  push:
+    branches: ["main", "phase-*"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Formatting (ruff format --check)
+        run: make format-check
+
+      - name: Lint (ruff check)
+        run: make lint
+
+      - name: Type check (mypy, every service)
+        run: make typecheck
+
+      - name: Build devtools image (coverage/security/pre-commit)
+        run: make setup-dev
+
+      - name: Test + coverage (167 tests, six suites, coverage.xml)
+        run: make coverage
+
+      - name: Upload coverage.xml
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 14
+
+      - name: Pre-commit hygiene hooks (whole tree)
+        run: make pre-commit
+
+      - name: Security scan (bandit + pip-audit)
+        run: make security
+
+      - name: Validate docker-compose.yml
+        run: make docker-validate
+
+      - name: Build application images
+        run: make docker-build

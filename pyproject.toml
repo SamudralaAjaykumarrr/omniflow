@@ -12,3 +12,52 @@ ignore = ["B008"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app", "event_contracts"]
+
+[tool.ruff.format]
+# Defaults (double quotes, space indent) — declared explicitly so
+# `ruff format` and `ruff format --check` are unambiguous in CI.
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = true
+exclude = ["migrations/versions/"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+
+[tool.coverage.run]
+branch = true
+omit = [
+  "*/tests/*",
+  "*/migrations/*",
+  "*/.venv/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+precision = 1
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "def __repr__",
+]
+
+# Each service's test suite runs inside its own container with its own
+# absolute root (/app/services/<name> — see each Dockerfile's WORKDIR;
+# event-contracts alone runs from a bind-mounted /repo, see
+# `make test-contracts`). `make coverage`'s combine step bind-mounts the
+# repo at both /app and /repo so recorded paths resolve, then uses this
+# alias so the combined report/coverage.xml shows one consistent
+# repo-relative path per file instead of two absolute roots for the same
+# tree.
+[tool.coverage.paths]
+source = [
+  ".",
+  "/app",
+  "/repo",
+]

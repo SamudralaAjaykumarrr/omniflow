@@ -5,6 +5,71 @@ architectural decisions get a full ADR under `docs/adrs/`; this log also
 captures smaller in-flight calls that don't warrant a standalone ADR, plus
 pointers to the ADRs when they do.
 
+## 2026-07-25 — Phase 5: Engineering quality
+
+- **This branch's name reuses "Phase 5", but its scope is not the
+  `PROJECT_STATUS.md` phase table's Phase 5 (Data quality, already done,
+  folded into Phase 4).** Rather than renumber the established 0-13 table —
+  which every other doc (README, RISKS, ADRs) cross-references by number —
+  this work is documented as its own cross-cutting initiative
+  (`docs/phase-5-engineering-quality.md`) that pulls a slice of three later
+  phases' scope forward: coverage tooling/threshold (Phase 10), dependency/
+  SAST security scanning (part of Phase 9 — JWT/RBAC finalization is not in
+  this slice), and CI (Phase 12 — pipeline exists now, but hasn't run in
+  GitHub's own hosted environment yet since this repo has no verified
+  Actions run at time of writing). `PROJECT_STATUS.md`'s phase table itself
+  is not renumbered.
+- **A shared `infra/docker/devtools` image, not per-target `pip install`,
+  for the new tooling.** Existing targets (`lint`/`format`/`typecheck`)
+  already install their own deps ad hoc per invocation — fine when it's one
+  tool. `coverage`/`security`/`pre-commit` each need several tools at once
+  (coverage+combine, bandit+pip-audit, pre-commit+git), so a single pinned
+  image built once via `make setup-dev` and reused is both faster and keeps
+  version pins in one place instead of three.
+- **Coverage combine reconciles two different absolute roots via
+  `[tool.coverage.paths]`, not a rewritten test-collection setup.** Every
+  service's own container records absolute paths under `/app/services/<name>`
+  (that service's own Dockerfile `WORKDIR`); `event-contracts` alone records
+  under `/repo/services/event-contracts` (`make test-contracts` bind-mounts
+  the repo at `/repo`, not `/app`). Rather than changing five working
+  Dockerfiles' `WORKDIR` or `test-contracts`' mount point to unify these,
+  the combine step in `make coverage` bind-mounts the repo at *both* `/app`
+  and `/repo` and lets `pyproject.toml`'s `[tool.coverage.paths]` alias
+  section fold the two into one relative path per file.
+- **Coverage is statement-only, not branch, despite `pyproject.toml`
+  declaring `[tool.coverage.run] branch = true`.** Each service's own
+  container runs `pytest --cov=app` from a directory that doesn't contain
+  the repo-root `pyproject.toml` (only the service's own code is `COPY`'d
+  into the image), so pytest-cov never sees `branch = true` at the moment
+  it matters — collection time, not report time. Fixing this properly means
+  either copying `pyproject.toml` into every service image or passing
+  `--cov-branch` explicitly on every `pytest` invocation; deferred as a
+  known limitation (`TEST_RESULTS.md`'s Phase 5 entry) rather than done
+  speculatively, since it would touch five working Dockerfiles/Makefile
+  targets for a coverage-shape change with no immediate threshold impact
+  (the current 65% threshold is set against the statement-only number that's
+  actually being measured).
+- **`COV_THRESHOLD := 65`, measured, not assumed.** `make coverage`'s first
+  real combined run (167 tests, six suites) reported 71.6% before any
+  threshold existed to pass or fail against. 65 was chosen after seeing that
+  number — a few points under it, not at it, so one new untested branch
+  doesn't fail CI outright — not picked in advance and then hit by
+  adjusting scope to match (`RISKS.md` #4's fabrication-risk mitigation
+  extends to this number too).
+- **`pip-audit` findings are suppressed by explicit, individually-justified
+  `--ignore-vuln` ID, never by a blanket `|| true` or disabling the target.**
+  9 of 14 real CVEs found in the first `make security` run are accepted
+  risks (documented in full in `RISKS.md` #20): `starlette`'s fixes need a
+  `fastapi` major-version bump this codebase can't safely take in this same
+  pass (verified: `pip install fastapi==0.115.0 starlette==0.40.0` →
+  `ResolutionImpossible`), and `pytest`/`pyarrow`'s are inapplicable to how
+  this codebase actually uses them (a test-only dependency's local-tmpdir
+  collision in a single-user container; a C++ API pyarrow's own advisory
+  says isn't reachable from Python bindings). The other 5 (`pip` itself)
+  were fixed outright by pinning `pip==26.1.2` in every Dockerfile, not
+  added to the ignore list — ignoring is for what's genuinely accepted, not
+  a shortcut around fixing what's fixable.
+
 ## 2026-07-25 — Phase 4: Data engineering platform
 
 - Completed the Bronze/Silver/Gold pipeline that was already in progress
