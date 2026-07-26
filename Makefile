@@ -1,6 +1,8 @@
 .PHONY: help demo up down reset logs migrate setup-dev test test-contracts test-order test-inventory test-gateway \
 	test-orchestrator test-data-platform smoke replay generate dq-report backfill lint format \
-	format-check typecheck coverage security docker-validate docker-build pre-commit ci
+	format-check typecheck coverage security docker-validate docker-build pre-commit ci \
+	streaming-up streaming-down inspect-bronze inspect-bronze-rejects inspect-silver \
+	inspect-silver-rejects inspect-late-events inspect-gold phase6-smoke phase6-validate clean-phase6
 
 COMPOSE := docker compose
 RUFF := python:3.12-slim
@@ -144,6 +146,56 @@ dq-report:
 ## Usage: make backfill ARGS="silver --event-type order.created --from-date 2026-07-25 --to-date 2026-07-25"
 backfill:
 	$(COMPOSE) run --rm spark-gold python -m app.backfill $(ARGS)
+
+## Start only the Spark streaming pipeline (bronze/silver/gold + lag poller) against an already-up stack (Redpanda/MinIO/Postgres).
+streaming-up:
+	$(COMPOSE) up -d spark-bronze spark-silver spark-gold lag-poller
+
+## Stop only the Spark streaming pipeline containers — leaves Redpanda/MinIO/Postgres and every volume/checkpoint untouched.
+streaming-down:
+	$(COMPOSE) stop spark-bronze spark-silver spark-gold lag-poller
+
+## Inspect Bronze objects in MinIO (object count/bytes by event_type partition + sample keys).
+inspect-bronze:
+	$(COMPOSE) run --rm spark-gold python -m app.inspect bronze
+
+## Inspect Bronze's malformed-JSON quarantine (unparseable Kafka records, never written to Bronze itself).
+inspect-bronze-rejects:
+	$(COMPOSE) run --rm spark-gold python -m app.inspect bronze_rejects
+
+## Inspect Silver objects in MinIO (object count/bytes by event_type partition + sample keys).
+inspect-silver:
+	$(COMPOSE) run --rm spark-gold python -m app.inspect silver
+
+## Inspect Silver's schema/business-validation quarantine (silver_rejects).
+inspect-silver-rejects:
+	$(COMPOSE) run --rm spark-gold python -m app.inspect silver_rejects
+
+## Inspect late-arriving events routed out of Silver (late_events).
+inspect-late-events:
+	$(COMPOSE) run --rm spark-gold python -m app.inspect late_events
+
+## Inspect Gold aggregates in MinIO (object count/bytes by dataset partition + sample keys).
+inspect-gold:
+	$(COMPOSE) run --rm spark-gold python -m app.inspect gold
+
+## Phase 6 end-to-end smoke test: synthetic traffic (incl. duplicate/late/
+## malformed injection) -> real Kafka -> Bronze/Silver/Gold -> DQ report,
+## plus a Bronze restart/checkpoint check. Usage: make phase6-smoke
+phase6-smoke:
+	bash scripts/phase6_smoke_test.sh
+
+## Everything that gates Phase 6 as done: unit/Spark tests, the smoke test above, and the existing project CI gate.
+phase6-validate: test-data-platform phase6-smoke ci
+
+## Remove disposable local Phase 6 dev output only (pytest/mypy/ruff caches
+## under services/data-platform) — deliberately never touches MinIO data,
+## checkpoints, Kafka topics, or any Docker volume (hard restriction: this
+## repo never deletes project data as part of routine/automated cleanup).
+clean-phase6:
+	rm -rf services/data-platform/.pytest_cache services/data-platform/.mypy_cache \
+		services/data-platform/.ruff_cache
+	find services/data-platform -type d -name __pycache__ -exec rm -rf {} +
 
 ## Lint/format run in a throwaway container — no host Python toolchain is assumed (see PROJECT_STATUS.md).
 lint:

@@ -3,6 +3,18 @@
 See "Bronze — immutable raw events" in docs/data-pipeline.md. Append-only,
 never updated or deleted: the system of record for "what did the bus
 actually carry" and the input to any Silver reprocessing.
+
+Malformed-event handling: a Kafka record whose `value` isn't parseable JSON
+matching the event envelope shape (or is empty/tombstone) is quarantined to
+`bronze_rejects` (see `transform_to_bronze_rejects`) rather than being
+written into Bronze with null envelope fields under an unusable
+`event_type=null/date=null` partition, which would otherwise leave it
+invisible to every downstream reader (Silver only ever reads a specific
+`event_type=<X>` subdirectory — see `app.silver.read_bronze_stream_for_type`).
+This is a distinct, earlier quarantine step from Silver's own
+`silver_rejects` (which quarantines rows with a parseable envelope but a
+failed schema/business validation) — see "Malformed-event handling" in
+docs/data-pipeline.md.
 """
 
 from __future__ import annotations
@@ -15,6 +27,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.streaming import StreamingQuery
 
 from app.config import Settings, get_settings
+from app.metrics import record_rows, start_metrics_server, track_batch_duration
 from app.schemas import BRONZE_TABLE_SCHEMA, ENVELOPE_SCHEMA
 from app.spark_session import build_spark_session
 from app.topics import ALL_TOPICS
@@ -38,13 +51,37 @@ def read_kafka_stream(
     )
 
 
-def transform_to_bronze(raw_df: DataFrame) -> DataFrame:
-    """Pure transform: raw Kafka rows -> Bronze rows. Works identically on a
-    streaming or a static (batch/test) DataFrame — no I/O, no watermark, so
-    it is unit-testable with a plain `spark.createDataFrame(...)`."""
+def _envelope_is_malformed(raw_df: DataFrame) -> DataFrame:
+    """Shared detection expression: flags a Kafka row as malformed if its
+    `value` is empty/null, or is JSON that doesn't parse into anything
+    matching the envelope shape. `from_json` against a `StructType` never
+    raises — it returns a wholly-null struct (unparseable JSON syntax, or
+    top-level JSON that isn't an object) or a struct with individually-null
+    fields (valid JSON object, wrong/empty shape); a row missing *both*
+    `event_id` and `event_type` is not a real envelope in either case (every
+    real producer always sets both — `docs/event-catalog.md`'s envelope is
+    non-optional on both). Adds `_malformed`/`_malformed_reason`; never
+    drops a row — callers filter by `_malformed` after this."""
     value_str = F.col("value").cast("string")
     parsed = F.from_json(value_str, ENVELOPE_SCHEMA)
-    return raw_df.select(
+    unparseable = parsed.isNull() | (parsed["event_id"].isNull() & parsed["event_type"].isNull())
+    reason = F.when(value_str.isNull(), F.lit("empty_kafka_value")).when(
+        unparseable, F.lit("unparseable_or_empty_envelope")
+    )
+    return raw_df.withColumn("_malformed", value_str.isNull() | unparseable).withColumn(
+        "_malformed_reason", reason
+    )
+
+
+def transform_to_bronze(raw_df: DataFrame) -> DataFrame:
+    """Pure transform: raw Kafka rows -> Bronze rows, excluding malformed
+    rows (see `transform_to_bronze_rejects`). Works identically on a
+    streaming or a static (batch/test) DataFrame — no I/O, no watermark, so
+    it is unit-testable with a plain `spark.createDataFrame(...)`."""
+    flagged = _envelope_is_malformed(raw_df).filter(~F.col("_malformed"))
+    value_str = F.col("value").cast("string")
+    parsed = F.from_json(value_str, ENVELOPE_SCHEMA)
+    return flagged.select(
         parsed["event_id"].alias("event_id"),
         parsed["event_type"].alias("event_type"),
         parsed["schema_version"].alias("schema_version"),
@@ -60,6 +97,27 @@ def transform_to_bronze(raw_df: DataFrame) -> DataFrame:
         F.col("timestamp").alias("kafka_timestamp"),
         F.current_timestamp().alias("ingested_at"),
         F.to_date(F.to_timestamp("occurred_at")).alias("date"),
+    )
+
+
+def transform_to_bronze_rejects(raw_df: DataFrame) -> DataFrame:
+    """Pure transform: raw Kafka rows -> Bronze quarantine rows (the
+    complement of `transform_to_bronze`). Partitioned by ingestion date only
+    (not `event_type`, which is unknown for a malformed payload by
+    definition) — see "Malformed-event handling" in docs/data-pipeline.md.
+    Keeps the raw string value and Kafka coordinates so an operator can
+    inspect exactly what the bus carried and, if a producer bug is later
+    fixed, correlate against `kafka_topic`/`kafka_partition`/`kafka_offset`."""
+    flagged = _envelope_is_malformed(raw_df).filter(F.col("_malformed"))
+    return flagged.select(
+        F.col("topic").alias("kafka_topic"),
+        F.col("partition").alias("kafka_partition"),
+        F.col("offset").alias("kafka_offset"),
+        F.col("timestamp").alias("kafka_timestamp"),
+        F.col("value").cast("string").alias("raw_value"),
+        F.col("_malformed_reason").alias("reason"),
+        F.current_timestamp().alias("ingested_at"),
+        F.current_date().alias("date"),
     )
 
 
@@ -89,17 +147,41 @@ def read_bronze_batch(
     return df
 
 
+def _write_batch(settings: Settings):
+    def _inner(batch_df: DataFrame, batch_id: int) -> None:
+        with track_batch_duration("bronze", "all_topics"):
+            valid = transform_to_bronze(batch_df)
+            rejects = transform_to_bronze_rejects(batch_df)
+            valid_count = valid.count()
+            if valid_count > 0:
+                valid.write.mode("append").partitionBy("event_type", "date").parquet(
+                    settings.bronze_path
+                )
+            reject_count = rejects.count()
+            if reject_count > 0:
+                rejects.write.mode("append").partitionBy("date").parquet(
+                    settings.bronze_rejects_path
+                )
+        record_rows("bronze", "all_topics", {"valid": valid_count, "malformed": reject_count})
+        logger.info(
+            "bronze batch %s: %s valid, %s malformed (quarantined to bronze_rejects)",
+            batch_id,
+            valid_count,
+            reject_count,
+        )
+
+    return _inner
+
+
 def write_bronze_stream(
-    df: DataFrame,
+    raw_df: DataFrame,
     settings: Settings,
     *,
     trigger_once: bool = False,
 ) -> StreamingQuery:
     writer = (
-        df.writeStream.format("parquet")
-        .option("path", settings.bronze_path)
+        raw_df.writeStream.foreachBatch(_write_batch(settings))
         .option("checkpointLocation", f"{settings.checkpoints_path}/bronze")
-        .partitionBy("event_type", "date")
         .outputMode("append")
     )
     if trigger_once:
@@ -120,11 +202,11 @@ def main() -> None:
 
     settings = get_settings()
     logging.basicConfig(level=logging.INFO)
+    start_metrics_server(settings.metrics_port)
     spark = build_spark_session("omniflow-bronze", settings)
 
     raw = read_kafka_stream(spark, settings)
-    bronze = transform_to_bronze(raw)
-    query = write_bronze_stream(bronze, settings, trigger_once=args.once)
+    query = write_bronze_stream(raw, settings, trigger_once=args.once)
     logger.info("bronze streaming query started (once=%s)", args.once)
     query.awaitTermination()
 

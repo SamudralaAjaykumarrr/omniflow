@@ -36,6 +36,7 @@ from pyspark.sql.streaming import StreamingQuery
 from pyspark.sql.types import DateType, StructField, StructType
 
 from app.config import Settings, get_settings
+from app.metrics import record_rows, start_metrics_server, track_batch_duration
 from app.s3 import ensure_prefix_exists
 from app.schemas import BRONZE_TABLE_SCHEMA, REQUIRED_DATA_FIELDS, SILVER_SCHEMA_REGISTRY
 from app.spark_session import build_spark_session
@@ -213,43 +214,50 @@ def split_silver_batch(batch_df: DataFrame) -> tuple[DataFrame, DataFrame, DataF
 
 def _write_batch(settings: Settings, event_type: str):
     def _inner(batch_df: DataFrame, batch_id: int) -> None:
-        on_time, late, invalid = split_silver_batch(batch_df)
+        with track_batch_duration("silver", event_type):
+            on_time, late, invalid = split_silver_batch(batch_df)
 
-        # Each event type's query writes to its own base path
-        # (`.../event_type=<X>`, partitioned only by `date`) rather than a
-        # path shared across all 11 concurrent per-event-type queries
-        # (previously `settings.silver_path` etc. directly, dynamically
-        # partitioned by `event_type`). Spark's default rename-based
-        # FileOutputCommitter stages writes under a `_temporary/<jobId>/...`
-        # directory scoped to the *output path*, not the query — with 11
-        # independent streaming queries committing concurrently to the same
-        # output path, their `_temporary` staging collided, and S3A/MinIO
-        # (rename = copy+delete, not atomic) surfaced this as a real
-        # `RemoteFileChangedException` write failure that killed the query.
-        # Caught running this for real against MinIO with real concurrent
-        # traffic, not in unit tests, which use one query at a time. A
-        # distinct base path per event type gives every query its own
-        # non-shared `_temporary` directory — matches the read side's own
-        # "read the specific event_type= subdirectory directly" pattern
-        # (`read_bronze_stream_for_type`/`read_silver_stream`). `event_type`
-        # is dropped before writing since it's now encoded in the path
-        # itself, same as when it was a partition column; readers already
-        # re-add it via `.withColumn("event_type", F.lit(event_type))`.
-        on_time_count = on_time.count()
-        if on_time_count > 0:
-            on_time.drop("event_type").write.mode("append").partitionBy("date").parquet(
-                f"{settings.silver_path}/event_type={event_type}"
-            )
-        late_count = late.count()
-        if late_count > 0:
-            late.drop("event_type").write.mode("append").partitionBy("date").parquet(
-                f"{settings.late_events_path}/event_type={event_type}"
-            )
-        invalid_count = invalid.count()
-        if invalid_count > 0:
-            invalid.drop("event_type").write.mode("append").partitionBy("date").parquet(
-                f"{settings.silver_rejects_path}/event_type={event_type}"
-            )
+            # Each event type's query writes to its own base path
+            # (`.../event_type=<X>`, partitioned only by `date`) rather than a
+            # path shared across all 11 concurrent per-event-type queries
+            # (previously `settings.silver_path` etc. directly, dynamically
+            # partitioned by `event_type`). Spark's default rename-based
+            # FileOutputCommitter stages writes under a `_temporary/<jobId>/...`
+            # directory scoped to the *output path*, not the query — with 11
+            # independent streaming queries committing concurrently to the same
+            # output path, their `_temporary` staging collided, and S3A/MinIO
+            # (rename = copy+delete, not atomic) surfaced this as a real
+            # `RemoteFileChangedException` write failure that killed the query.
+            # Caught running this for real against MinIO with real concurrent
+            # traffic, not in unit tests, which use one query at a time. A
+            # distinct base path per event type gives every query its own
+            # non-shared `_temporary` directory — matches the read side's own
+            # "read the specific event_type= subdirectory directly" pattern
+            # (`read_bronze_stream_for_type`/`read_silver_stream`). `event_type`
+            # is dropped before writing since it's now encoded in the path
+            # itself, same as when it was a partition column; readers already
+            # re-add it via `.withColumn("event_type", F.lit(event_type))`.
+            on_time_count = on_time.count()
+            if on_time_count > 0:
+                on_time.drop("event_type").write.mode("append").partitionBy("date").parquet(
+                    f"{settings.silver_path}/event_type={event_type}"
+                )
+            late_count = late.count()
+            if late_count > 0:
+                late.drop("event_type").write.mode("append").partitionBy("date").parquet(
+                    f"{settings.late_events_path}/event_type={event_type}"
+                )
+            invalid_count = invalid.count()
+            if invalid_count > 0:
+                invalid.drop("event_type").write.mode("append").partitionBy("date").parquet(
+                    f"{settings.silver_rejects_path}/event_type={event_type}"
+                )
+
+        record_rows(
+            "silver",
+            event_type,
+            {"on_time": on_time_count, "late": late_count, "invalid": invalid_count},
+        )
         logger.info(
             "silver batch %s (%s): %s on-time, %s late, %s rejected",
             batch_id,
@@ -273,9 +281,35 @@ def build_type_query(
     bronze_stream = read_bronze_stream_for_type(spark, settings, event_type)
     parsed = parse_and_flatten(bronze_stream, event_type, schema_version)
     validated = validate(parsed, event_type, schema_version)
-    deduped = validated.withWatermark(
-        "occurred_at_ts", DEDUP_WATERMARK
-    ).dropDuplicatesWithinWatermark(["event_id"])
+    # Watermark declared on `ingested_at` (Bronze ingestion wall-clock time),
+    # not the business `occurred_at_ts` column — deliberately, not the
+    # original choice. `dropDuplicatesWithinWatermark` isn't just "ignore
+    # duplicates that arrive after the watermark closes"; Spark's watermark
+    # mechanism drops *any* row (duplicate or not) whose watermark column
+    # value trails the query's already-advanced max-seen value by more than
+    # `DEDUP_WATERMARK`, since that's what bounds the operator's state.
+    # `occurred_at_ts` is a *business* timestamp that can legitimately jump
+    # far ahead of real time for some event types (e.g. `order.shipped`'s
+    # simulated shipping delay is up to 60 minutes after `order.created`,
+    # `app.generator.generate_order_lifecycle`) — one high-latency shipment
+    # advances the watermark far into the future, and a *subsequent*,
+    # perfectly valid, non-duplicate `order.shipped` row with a smaller
+    # `occurred_at_ts` (a lower-latency shipment processed later) then falls
+    # behind that advanced watermark and is silently dropped by Spark
+    # itself, never reaching `_write_batch` at all — not quarantined, not
+    # counted late, just gone. Caught for real running the Phase 6 smoke
+    # test (`scripts/phase6_smoke_test.sh`) against real Kafka/MinIO data at
+    # real volume: `order.shipped` reconciled ~44% short in `app.dq.report`,
+    # see DECISIONS.md. `ingested_at` (`F.current_timestamp()` at Bronze
+    # write time) only ever moves forward with real processing time, so it
+    # safely bounds dedup state without this failure mode. `mark_lateness`'s
+    # own late-event classification (`ingested_at` - `occurred_at_ts`,
+    # below) is unaffected — it already used `ingested_at` as its measure
+    # of "the pipeline saw this late," which is exactly this bug's fix
+    # generalized to the dedup watermark too.
+    deduped = validated.withWatermark("ingested_at", DEDUP_WATERMARK).dropDuplicatesWithinWatermark(
+        ["event_id"]
+    )
 
     writer = (
         deduped.writeStream.foreachBatch(_write_batch(settings, event_type))
@@ -297,6 +331,7 @@ def main() -> None:
 
     settings = get_settings()
     logging.basicConfig(level=logging.INFO)
+    start_metrics_server(settings.metrics_port)
     # `local[*]` (build_spark_session's default, per ADR 0005) matters more
     # here than for any other job in this package: this job runs 11
     # concurrent per-event-type queries (one per topic in ALL_TOPICS), and

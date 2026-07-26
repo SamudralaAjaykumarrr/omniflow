@@ -16,6 +16,7 @@ from pyspark.sql.streaming import StreamingQuery
 from app.config import Settings, get_settings
 from app.gold import queries
 from app.gold.common import write_gold_stream
+from app.metrics import start_metrics_server
 from app.silver_io import read_silver_stream
 from app.spark_session import build_spark_session
 from event_contracts.event_types import EventType
@@ -95,6 +96,7 @@ def main() -> None:
 
     settings = get_settings()
     logging.basicConfig(level=logging.INFO)
+    start_metrics_server(settings.metrics_port)
     # `local[*]` (the default, per ADR 0005) matters more here than for most
     # jobs in this package — this job runs 9 concurrent datasets; see
     # app.silver.main's comment for why that many concurrent queries need it.

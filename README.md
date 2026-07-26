@@ -15,21 +15,25 @@ retailer.
 **Phases 1-4 of 13 are done and verified** (Phase 5, Data quality, is also
 done — folded into Phase 4). **Phases 6-8, 11, 13 have not been started**;
 parts of 9, 10, and 12 have been pulled forward as a separate engineering-
-quality pass (see below).
+quality pass, and the Phase 4 streaming data platform has had a hardening
+pass on top (see below).
 
 | Done now | Not started yet |
 |---|---|
 | Core domain (orders, inventory, API gateway) | Demand forecasting |
 | Event platform (Redpanda, saga orchestrator, DLQ, replay) | Ops dashboard (React/TypeScript) |
 | Observability (structured logs, tracing, metrics, Grafana) | Failure laboratory |
-| Data platform (Spark Bronze/Silver/Gold, data quality, backfill) | JWT/RBAC, load testing, Terraform, career docs |
+| Data platform (Spark Bronze/Silver/Gold, data quality, backfill, malformed-event quarantine, Spark job metrics) | JWT/RBAC, load testing, Terraform, career docs |
 | Measured coverage threshold, security scanning, pre-commit, CI (`docs/phase-5-engineering-quality.md`) | An actual GitHub-hosted CI run (workflow authored + verified locally only) |
 
 Data quality (checks + report) was originally scoped as its own phase but was
 folded into Phase 4, since the Spark plumbing it depends on was already in
 place. The engineering-quality pass reuses the number "Phase 5" in its
 branch name by coincidence — it is not that phase; see
-`docs/phase-5-engineering-quality.md` for the naming note. Full
+`docs/phase-5-engineering-quality.md` for the naming note. A later
+streaming-data-platform hardening pass similarly reuses "Phase 6" in its
+branch name by coincidence — the real Phase 6 (demand forecasting) is still
+not started; see `docs/phase-6-streaming-data-platform.md`. Full
 phase-by-phase detail: `PROJECT_STATUS.md`.
 
 ## Verified proof points
@@ -38,7 +42,7 @@ Every number below comes from a command actually run against this repo (see
 `TEST_RESULTS.md`; nothing here is estimated) or from a real
 `docker compose up` verified in `PROJECT_STATUS.md`:
 
-- **167 tests passing, 0 failing** across six suites (event-contracts,
+- **181 tests passing, 0 failing** across six suites (event-contracts,
   order-service, inventory-service, fulfillment-orchestrator, api-gateway,
   data-platform)
 - **23 containers** (full app stack + Redpanda + MinIO + Spark + observability
@@ -72,9 +76,11 @@ Every number below comes from a command actually run against this repo (see
 - **Tracing that survives the Kafka boundary**: one Jaeger trace, manually
   inspected, covers a single order across the gateway, order service, and
   orchestrator's async saga steps.
-- **Nine real bugs found and fixed by actually running the system** (Spark
+- **Eleven real bugs found and fixed by actually running the system** (Spark
   scheduler starvation, MinIO's bulk-delete rejection, a Structured Streaming
-  metadata-visibility gap, and more) — full writeups in `DECISIONS.md`.
+  metadata-visibility gap, a dedup watermark declared on the wrong timestamp
+  column silently dropping valid rows, and more) — full writeups in
+  `DECISIONS.md`.
 
 ## Architecture overview
 
@@ -110,24 +116,28 @@ yet built): `docs/architecture.md`.
 ## Data platform
 
 PySpark Structured Streaming (`local[*]`, single-node) reads all 11
-event-catalog topics into Bronze (immutable raw Parquet), validates and
-deduplicates into Silver (rejects and late events routed to their own paths,
-never dropped silently), and aggregates into 10 Gold datasets. Also
-included: a synthetic event generator with configurable duplicate/late-event
-injection, an executable data-quality suite (reconciliation, rejection rate,
-duplicate rate, lateness, freshness) with a JSON report, and batch
-backfill/reprocessing tooling with row-count validation before swapping into
-the live path. Full design: `docs/data-pipeline.md`.
+event-catalog topics into Bronze (immutable raw Parquet, with malformed/
+unparseable Kafka records quarantined to their own path rather than
+written with null envelope fields), validates and deduplicates into Silver
+(rejects and late events routed to their own paths, never dropped
+silently), and aggregates into 10 Gold datasets. Also included: a synthetic
+event generator with configurable duplicate/late-event/malformed-record
+injection, an executable data-quality suite (reconciliation, rejection
+rate, duplicate rate, lateness, freshness) with a JSON report, batch
+backfill/reprocessing tooling with row-count validation before swapping
+into the live path, a MinIO data-lake inspection CLI, and an end-to-end
+smoke test (`make phase6-smoke`). Full design: `docs/data-pipeline.md`,
+`docs/phase-6-streaming-data-platform.md`.
 
 ## Observability
 
 Structured JSON logs with `correlation_id` on every line; OpenTelemetry
 tracing pushed to Jaeger, with trace context carried across the Kafka
 boundary in the event envelope itself; Prometheus metrics pulled from every
-FastAPI service and background worker; a provisioned Grafana dashboard
-(request rate/latency, Kafka lag/retries/DLQ, saga duration, DB pool). The
-Spark data-platform services do not yet export metrics — see Known
-limitations.
+FastAPI service, every background worker, and every Spark bronze/silver/
+gold job (`data_platform_batch_rows_total`/`data_platform_batch_duration_seconds`);
+a provisioned Grafana dashboard (request rate/latency, Kafka lag/retries/
+DLQ, saga duration, DB pool).
 
 ## Verified test and environment evidence
 
@@ -142,8 +152,8 @@ a container.
 | inventory-service | 18 | 0 |
 | fulfillment-orchestrator | 29 | 0 |
 | api-gateway | 9 | 0 |
-| data-platform | 40 | 0 |
-| **Total** | **167** | **0** |
+| data-platform | 54 | 0 |
+| **Total** | **181** | **0** |
 
 Also verified against a real, freshly-started `docker compose up`: the full
 order lifecycle end to end (including the payment-decline/compensation
@@ -183,6 +193,9 @@ make smoke        # end-to-end order lifecycle + observability verification
 make generate     # run the synthetic event generator against the live stack
 make dq-report    # run the data-quality report against live MinIO data
 make backfill     # Silver/Gold backfill and reprocessing tooling
+make phase6-smoke # end-to-end data-platform smoke test (generate -> bronze -> silver -> gold -> dq-report)
+make inspect-bronze / inspect-silver / inspect-gold / inspect-bronze-rejects / inspect-silver-rejects / inspect-late-events
+                  # inspect MinIO data-lake prefixes from the command line
 make reset        # tear down containers and volumes for a clean slate
 make logs         # tail all service logs
 
@@ -258,9 +271,12 @@ Full index of all 10 ADRs: `docs/adrs/README.md`.
 - **Saga resume gap**: a crash between a successful remote reservation and
   the saga's local commit of that step leaves no local record — fails loudly
   rather than double-reserving or guessing. Accepted, not solved (`RISKS.md` #11).
-- **Data platform has no metrics visibility yet**: ports are declared but no
-  Spark service starts a Prometheus exporter or gets scraped — a stalled job
-  is only visible via `docker compose logs` (`RISKS.md` #19).
+- **`--once` mode's final Silver micro-batch can leave a real,
+  non-self-healing reconciliation gap** (verified: doesn't clear even after
+  25+ minutes past the watermark) — `Trigger.AvailableNow()` gives no
+  guaranteed flush cycle for a watermark-gated stateful operator's last
+  batch. Not source data loss (Bronze/Kafka still have it); recovered via
+  `app.backfill silver --apply` (`RISKS.md` #22).
 - **Single-instance-only gateway**: in-process rate limiting and per-process
   DB pooling, would not survive horizontal scaling without a shared backing
   store (`RISKS.md` #13).

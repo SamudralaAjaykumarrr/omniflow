@@ -20,10 +20,12 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.utils import AnalysisException
 
+from app.bronze import read_bronze_batch
 from app.config import Settings, get_settings
 from app.dq.checks import run_all_checks
 from app.s3 import s3_options
 from app.spark_session import build_spark_session
+from app.topics import ALL_TOPICS
 
 logger = logging.getLogger("data_platform.dq")
 
@@ -42,8 +44,44 @@ def _read_layer_for_date(spark: SparkSession, path: str, date: str) -> DataFrame
     return df.filter(F.col("date") == date)
 
 
+def _read_bronze_for_date(spark: SparkSession, settings: Settings, date: str) -> DataFrame | None:
+    """Reads Bronze per `event_type=<X>` subdirectory (`app.bronze.read_bronze_batch`
+    — the same access pattern `app.backfill` already uses) and unions the
+    results, rather than a single `spark.read.parquet(settings.bronze_path)`
+    against the Bronze *root*.
+
+    Deliberately not `_read_layer_for_date(spark, settings.bronze_path, date)`:
+    an environment that ever ran Bronze's original single `.writeStream
+    .format("parquet")` writer (before Bronze moved to the same
+    per-micro-batch `foreachBatch` + plain-write pattern Silver/Gold already
+    used — see `app.bronze._write_batch`) has a `_spark_metadata` commit log
+    sitting at the Bronze root from that writer. Spark's plain
+    `spark.read.parquet(path)` auto-detects that log when it's present at
+    `path` and silently scopes the read to *only* the files it recorded,
+    hiding every file written since by a different mechanism (including
+    every `foreachBatch` write from this pattern going forward) — hit for
+    real running this for real against a MinIO volume with pre-existing
+    Bronze data, see DECISIONS.md. Reading each `event_type=` subdirectory
+    directly (never the root) sidesteps this entirely, matching how Silver/
+    late_events/silver_rejects are already laid out (no shared root either)."""
+    frames = []
+    for event_type in ALL_TOPICS:
+        try:
+            frames.append(
+                read_bronze_batch(spark, settings, event_type, from_date=date, to_date=date)
+            )
+        except AnalysisException:
+            continue
+    if not frames:
+        return None
+    result = frames[0]
+    for frame in frames[1:]:
+        result = result.unionByName(frame)
+    return result
+
+
 def build_report(spark: SparkSession, settings: Settings, date: str) -> dict:
-    bronze = _read_layer_for_date(spark, settings.bronze_path, date)
+    bronze = _read_bronze_for_date(spark, settings, date)
     silver = _read_layer_for_date(spark, settings.silver_path, date)
     rejects = _read_layer_for_date(spark, settings.silver_rejects_path, date)
     late = _read_layer_for_date(spark, settings.late_events_path, date)

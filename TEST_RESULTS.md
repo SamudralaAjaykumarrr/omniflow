@@ -1,6 +1,7 @@
 # Test Results
 
-Last updated: 2026-07-25 (Phase 5, Engineering quality, complete).
+Last updated: 2026-07-26 (Phase 6, Streaming data-platform hardening,
+complete).
 
 This file is updated after every phase with real output from real commands;
 no number here is ever estimated or invented (see `RISKS.md` #4).
@@ -517,3 +518,121 @@ either copying `pyproject.toml` into every service image or passing
 than done speculatively in this pass; tracked in
 `docs/phase-5-engineering-quality.md`.
   cross-topic noise, not a functional break; documented in `RISKS.md`.
+
+### 2026-07-26 — Phase 6: Streaming data-platform hardening
+
+Branch `phase-6-streaming-data-platform` — see
+`docs/phase-6-streaming-data-platform.md`. All commands below actually run
+in this session against real containers/data; no number is estimated.
+
+**Unit/Spark tests** (`make coverage`, which runs `make test` — all six
+suites — first): **181 passed, 0 failed, 0 skipped** (37 event-contracts +
+34 order-service + 18 inventory-service + 29 fulfillment-orchestrator + 9
+api-gateway + **54 data-platform**, up from 40 in Phase 4/5 — 14 new tests:
+6 Bronze malformed-JSON quarantine, 3 metrics, 3 inspect CLI, 1 Silver
+watermark regression, 2 `app.dq.report`'s new per-event-type Bronze read
+covering the `_spark_metadata`-poisoned-root fix).
+
+**Combined coverage** (`coverage combine` across all six suites):
+
+| Suite | Stmts | Miss | Cover |
+|---|---|---|---|
+| event-contracts | 321 | 41 | 87% |
+| order-service | 525 | 48 | 91% |
+| inventory-service | 469 | 33 | 93% |
+| api-gateway | 149 | 10 | 93% |
+| fulfillment-orchestrator | 762 | 294 | 61% |
+| data-platform | 904 | 480 | 47% |
+| **TOTAL** | **3130** | **906** | **71.1%** |
+
+`COV_THRESHOLD := 65` — passes (`coverage report --fail-under=65` exit 0).
+data-platform's new `app/metrics.py` is 100% covered;
+`app/inspect.py`/`app/bronze.py` partially (the live-Kafka/S3A code paths,
+same pre-existing pattern as the rest of this suite — covered by
+`make phase6-smoke` instead of unit tests, not by design gap).
+
+**Formatting** (`ruff format --check .`): 134 files, all formatted (after
+one `ruff format`/`ruff check --fix` pass to sort a new import block and
+reformat 3 touched files).
+
+**Lint** (`ruff check .`): all checks passed (0 errors).
+
+**Type checking** (`make typecheck`): all six packages pass clean —
+`event_contracts` (8), `order-service/app` (14), `inventory-service/app`
+(14), `fulfillment-orchestrator/app` (18), `api-gateway/app` (7),
+`data-platform/app` (21, up from 19 — `app/metrics.py`, `app/inspect.py`).
+
+**Pre-commit** (`make pre-commit`, `--all-files`): `trailing-whitespace`,
+`end-of-file-fixer`, `check-merge-conflict`, `check-added-large-files`,
+`check-yaml`, `check-json`, `check-toml`, `detect-private-key`,
+`mixed-line-ending`, `ruff`, `ruff-format` — all Passed.
+
+**Security** (`make security`): `bandit -ll` — 0 medium, 0 high across
+6,159 scanned lines (30 low-severity informational, matching Phase 5's
+baseline shape — no new medium/high introduced by this branch's code).
+`pip-audit --strict` (adds `prometheus-client==0.21.0` to
+data-platform's `requirements.txt`): `No known vulnerabilities found` on
+all six scan targets — data-platform reports "2 ignored" (its own
+pre-existing `pytest`/`pyarrow` accepted IDs; `prometheus-client` itself
+introduced no new CVE).
+
+**Docker Compose validation** (`make docker-validate`): valid.
+
+**Docker image builds** (`make docker-build`): `order-service`,
+`inventory-service`, `fulfillment-orchestrator`, `api-gateway`, `spark-gold`
+(data-platform, rebuilt with `prometheus-client` + the Bronze/Silver/
+metrics/inspect code changes) — all built successfully.
+
+**`make ci`**: exit 0.
+
+**Phase 6 smoke test** (`make phase6-smoke` / `scripts/phase6_smoke_test.sh`,
+real run against live Redpanda/MinIO/Spark, `--orders 20 --seed 42
+--duplicate-rate 0.15 --late-rate 0.05 --malformed-rate 0.15`):
+- Bronze: 268 objects after generation; **97 malformed records correctly
+  quarantined to `bronze_rejects`**, none written to the main Bronze table.
+- **Restart/checkpoint check: PASS** — re-running `bronze --once` with no
+  new Kafka data produced 0 new objects (268 -> 268).
+- Silver: 233 objects; `silver_rejects`: 1; `late_events`: 35.
+- Gold: 1,349 objects across all 9 streaming datasets.
+- `app.dq.report`: **known, documented gap** (`RISKS.md` #22) —
+  `bronze_silver_reconciliation` failed by 18 rows, isolated entirely to
+  `order.shipped` (the freshest data from this run's very last Bronze/
+  Silver micro-batch). Confirmed via direct testing earlier in this
+  session that this specific gap does not self-heal with time (verified:
+  unchanged after 25+ minutes, past the 10-minute dedup watermark) and
+  requires `app.backfill silver --apply` to recover — applied twice
+  during this session's own validation (for the historical bug fix in
+  finding D, and again for this run's own trailing gap), each time
+  reaching `app.dq.report overall: PASS` immediately afterward. Real,
+  captured output for one such recovery:
+  ```
+  silver reprocess counts: {'bronze_distinct_event_ids': 136, 'on_time': 129, 'late': 7, 'rejected': 0}
+  swapped into live path: {'silver': 1, 'late_events': 1, 'silver_rejects': 0}
+  ...
+  DQ report for 2026-07-26 — overall: PASS
+    [PASS] bronze_silver_reconciliation: value=0 threshold=0
+    [PASS] schema_rejection_rate: value=0.0 threshold=0.05
+    [PASS] duplicate_rate: value=0.14976744186046512 threshold=None
+    [PASS] late_event_rate: value=0.038293216630196934 threshold=0.1
+    [PASS] freshness: value=26.716535766666667 threshold=60
+  ```
+- Reported honestly, not smoothed over: the smoke test's `dq-report` step,
+  as scripted, does **not** guarantee a clean `PASS` on every single
+  invocation — it can hit `RISKS.md` #22's known gap on its own freshest
+  data. The pipeline's core correctness (ingestion, quarantine, restart-
+  safety, dedup, backfill recovery) is all real and verified above; this
+  one check's pass/fail is sensitive to a documented Spark
+  `Trigger.AvailableNow()` characteristic, not to a defect in this
+  branch's own code.
+
+**Real bug found and fixed, with before/after evidence** (`RISKS.md` #21,
+`DECISIONS.md`): Silver's dedup watermark on `occurred_at_ts` silently
+dropped valid `order.shipped` rows. Before the fix (this session, real
+data): `bronze_silver_reconciliation: value=-446` (`order.shipped`
+`bronze_distinct=0` — actually the separate `_spark_metadata`-poisoned-root
+bug, fixed first), then post-fix-of-that-bug but pre-watermark-fix:
+`value=64`, `order.shipped: {'bronze_distinct': 108, 'silver_decided': 60}`.
+After the watermark fix + `app.backfill --apply` recovery: `value=0`,
+`overall: PASS`. Regression test:
+`tests/test_silver.py::test_dedup_watermark_on_ingested_at_survives_wide_occurred_at_swings`
+— passing.

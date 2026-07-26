@@ -5,6 +5,92 @@ architectural decisions get a full ADR under `docs/adrs/`; this log also
 captures smaller in-flight calls that don't warrant a standalone ADR, plus
 pointers to the ADRs when they do.
 
+## 2026-07-26 — Phase 6: Streaming data-platform hardening
+
+- **This branch's name reuses "Phase 6", but its scope is not the
+  `PROJECT_STATUS.md` phase table's Phase 6 (Demand forecasting, not
+  started) — same naming collision as the `phase-5-engineering-quality`
+  branch.** The entire Bronze/Silver/Gold/DQ/generator/backfill platform
+  this branch hardens was already built and verified in Phase 4. Documented
+  as its own initiative (`docs/phase-6-streaming-data-platform.md`);
+  `PROJECT_STATUS.md`'s phase table is not renumbered.
+- **A real bug, found by actually running the pipeline, not by inspection:
+  Silver's dedup watermark was on the wrong timestamp column.**
+  `app.silver.build_type_query` declared `dropDuplicatesWithinWatermark`'s
+  watermark on `occurred_at_ts` (the event's own business timestamp).
+  `app.generator.generate_order_lifecycle` legitimately sets `order.shipped`'s
+  `occurred_at` up to 60 minutes after `order.created`'s (a simulated
+  shipping delay — real test data, not a generator bug; the
+  `fulfillment_latency`/`late_order_rate` Gold datasets need non-trivial
+  latency to be meaningful). Running the Phase 6 smoke test
+  (`scripts/phase6_smoke_test.sh`) against real Kafka/MinIO data at real
+  volume surfaced this: `app.dq.report`'s Bronze-vs-Silver reconciliation
+  check failed for `order.shipped` specifically, off by as much as ~44% in
+  one run. Root cause: Spark's watermark for a stateful operator advances
+  to `max(event time seen) − threshold`; **any** row (not just a
+  duplicate) whose watermark-column value trails that already-advanced
+  watermark is dropped by Spark itself, upstream of the sink — never
+  quarantined, never counted late, just silently gone. One high-latency
+  shipment's far-future `occurred_at_ts` could advance the watermark far
+  enough to drop a different, valid, lower-latency shipment processed
+  afterward. Fixed by watermarking on `ingested_at` (Bronze's ingestion
+  wall-clock time) instead — it only moves forward with real processing
+  time, so a business-modeled delay can't push it ahead of itself. Added a
+  regression test reproducing the exact failure mode with two synthetic
+  micro-batches. See `RISKS.md` #21, `docs/phase-6-streaming-data-platform.md`
+  section D.
+- **Recovered already-lost historical data with the existing backfill tool,
+  with explicit confirmation before the destructive step, not a checkpoint
+  reset.** This session's persistent MinIO volume had ~64 rows across 4
+  event types already silently dropped by the pre-fix code. `app.backfill`'s
+  `reprocess_silver` deduplicates with a plain `dropDuplicates` and no
+  watermark at all (a watermark on a batch DataFrame is a documented Spark
+  no-op), so it was never subject to the bug above and could recover the
+  lost rows exactly. Ran a dry-run first (no `--apply`) to confirm full
+  reconciliation (`bronze_distinct_event_ids == on_time + late + rejected`)
+  for each affected event type, then asked before running `--apply` (which
+  deletes-and-replaces the live Silver partition for that event-type/date —
+  an existing, documented, sanctioned recovery mechanism, but still a
+  destructive action on existing data, and the task's hard restrictions
+  require confirmation before that). `app.dq.report` reached
+  `overall: PASS` afterward.
+- **A second, related finding — verified empirically, not assumed:
+  `--once`/`Trigger.AvailableNow()`'s final micro-batch can leave a real,
+  non-self-healing reconciliation gap, not just a transient one.** First
+  suspected this was ordinary watermark-pending staleness that would clear
+  once `DEDUP_WATERMARK` (10 minutes) elapsed; tested that directly by
+  waiting 25+ minutes with no new traffic and re-running `silver --once`
+  in between (which found nothing new to process) — the gap was
+  unchanged. This rules out "just needs time"; it appears Structured
+  Streaming gives no guaranteed subsequent trigger to flush a
+  watermark-gated stateful operator's pending output once `availableNow`
+  decides there's no more source data. Not re-architected this pass
+  (would mean changing `--once`'s stop condition for stateful queries) —
+  recovered the same way as the historical rows above, via
+  `app.backfill silver --apply`, applied twice during this branch's own
+  validation to reach a genuine `app.dq.report overall: PASS`. See
+  `RISKS.md` #22.
+- **Bronze converted from a direct `.writeStream.format("parquet")` sink to
+  `foreachBatch`, matching Silver/Gold's already-established pattern —
+  needed to add the malformed-JSON quarantine split, and incidentally fixes
+  a latent inconsistency.** The original direct-sink approach maintains a
+  `_spark_metadata` commit log at the Bronze root (Structured Streaming's
+  `FileStreamSink`); `app.dq.report`'s original `_read_layer_for_date`
+  helper read that root directly via a plain `spark.read.parquet(path)` —
+  which auto-detects `_spark_metadata` when present and silently scopes the
+  read to *only* the files that log recorded, hiding every file written
+  since by a different mechanism. Once Bronze started writing via
+  `foreachBatch` (no `_spark_metadata`) while old `_spark_metadata` from a
+  prior session's runs still sat at the Bronze root, `app.dq.report`'s
+  Bronze reconciliation read zero rows for real, freshly-written data —
+  caught immediately (a completely-failing reconciliation, obviously
+  wrong, not a subtle undercounting). Fixed by having `app.dq.report` read
+  Bronze the same way `app.backfill` already does: per `event_type=`
+  subdirectory (`app.bronze.read_bronze_batch`, unioned across all topics),
+  never the poisoned root. This is the same failure class `RISKS.md` #18
+  already named for Gold; Bronze was the one remaining layer still using
+  the vulnerable pattern.
+
 ## 2026-07-25 — Phase 5: Engineering quality
 
 - **This branch's name reuses "Phase 5", but its scope is not the
