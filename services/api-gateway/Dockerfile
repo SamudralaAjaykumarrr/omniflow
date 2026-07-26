@@ -8,7 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
 COPY services/event-contracts /app/services/event-contracts
 COPY services/api-gateway/requirements.txt /app/services/api-gateway/requirements.txt
-RUN pip install --no-cache-dir -r /app/services/api-gateway/requirements.txt \
+RUN pip install --no-cache-dir --upgrade pip==26.1.2 \
+    && pip install --no-cache-dir -r /app/services/api-gateway/requirements.txt \
     && pip install --no-cache-dir -e /app/services/event-contracts
 
 COPY services/api-gateway /app/services/api-gateway

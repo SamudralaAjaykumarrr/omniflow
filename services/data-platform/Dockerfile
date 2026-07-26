@@ -22,7 +22,8 @@ WORKDIR /app
 
 COPY services/event-contracts /app/services/event-contracts
 COPY services/data-platform/requirements.txt /app/services/data-platform/requirements.txt
-RUN pip install --no-cache-dir -r /app/services/data-platform/requirements.txt \
+RUN pip install --no-cache-dir --upgrade pip==26.1.2 \
+    && pip install --no-cache-dir -r /app/services/data-platform/requirements.txt \
     && pip install --no-cache-dir -e /app/services/event-contracts
 
 # Pre-fetch Spark's Kafka source connector and S3A/AWS SDK jars (and every

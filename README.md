@@ -13,18 +13,24 @@ retailer.
 ## Current implementation status
 
 **Phases 1-4 of 13 are done and verified** (Phase 5, Data quality, is also
-done — folded into Phase 4). **Phases 6-13 have not been started.**
+done — folded into Phase 4). **Phases 6-8, 11, 13 have not been started**;
+parts of 9, 10, and 12 have been pulled forward as a separate engineering-
+quality pass (see below).
 
 | Done now | Not started yet |
 |---|---|
 | Core domain (orders, inventory, API gateway) | Demand forecasting |
 | Event platform (Redpanda, saga orchestrator, DLQ, replay) | Ops dashboard (React/TypeScript) |
 | Observability (structured logs, tracing, metrics, Grafana) | Failure laboratory |
-| Data platform (Spark Bronze/Silver/Gold, data quality, backfill) | Security hardening, load testing, CI/CD, Terraform, career docs |
+| Data platform (Spark Bronze/Silver/Gold, data quality, backfill) | JWT/RBAC, load testing, Terraform, career docs |
+| Measured coverage threshold, security scanning, pre-commit, CI (`docs/phase-5-engineering-quality.md`) | An actual GitHub-hosted CI run (workflow authored + verified locally only) |
 
 Data quality (checks + report) was originally scoped as its own phase but was
 folded into Phase 4, since the Spark plumbing it depends on was already in
-place. Full phase-by-phase detail: `PROJECT_STATUS.md`.
+place. The engineering-quality pass reuses the number "Phase 5" in its
+branch name by coincidence — it is not that phase; see
+`docs/phase-5-engineering-quality.md` for the naming note. Full
+phase-by-phase detail: `PROJECT_STATUS.md`.
 
 ## Verified proof points
 
@@ -45,6 +51,11 @@ Every number below comes from a command actually run against this repo (see
   traffic generated onto real topics, real Parquet observed at every layer,
   a data-quality report run against live MinIO data (overall PASS), and all
   10 Gold datasets successfully backfilled from real Silver data
+- **71.6% measured combined test coverage** across all six suites, a 65%
+  threshold enforced by `make coverage` and `coverage.xml` generated at the
+  repo root; `make security` (bandit + pip-audit) runs clean, with every
+  accepted CVE individually justified in `RISKS.md` #20 — full detail:
+  `docs/phase-5-engineering-quality.md`
 
 ## Verified engineering highlights
 
@@ -143,6 +154,13 @@ across all six packages; `ruff check`/`ruff format --check` pass clean. Full
 detail, including every bug found and fixed while producing these numbers:
 `TEST_RESULTS.md`.
 
+**Engineering quality** (`make ci`, exit 0, ~6m50s wall time on this host):
+combined coverage 71.6% (threshold 65%, `coverage.xml` generated), `bandit`
+0 medium/high, `pip-audit` clean after fixing 5 CVEs outright and
+individually accepting 9 with a written, verified reason each (`RISKS.md`
+#20), `docker compose config` valid, all five application images build.
+Full detail: `docs/phase-5-engineering-quality.md`.
+
 ## Quick-start instructions
 
 Requires only Docker + Docker Compose — no paid services, no host Python/
@@ -167,6 +185,15 @@ make dq-report    # run the data-quality report against live MinIO data
 make backfill     # Silver/Gold backfill and reprocessing tooling
 make reset        # tear down containers and volumes for a clean slate
 make logs         # tail all service logs
+
+make setup-dev    # build the shared devtools image (once, or after editing it)
+make coverage     # all six suites w/ coverage, combined coverage.xml, threshold-enforced
+make security     # bandit (SAST) + pip-audit (dependency CVEs)
+make pre-commit   # pre-commit hooks against the whole tree
+make docker-validate  # docker compose config
+make docker-build     # build all five application images
+make ci           # the full local gate: format-check, lint, typecheck, coverage, security, docker
+make help         # list every target with its description
 ```
 
 ## Project Screenshots
@@ -202,10 +229,13 @@ services/
   fulfillment-orchestrator/ Saga engine, node scoring, payment sim, DLQ, replay
   event-contracts/         Shared Kafka helpers, schemas, logging/tracing/metrics setup
   data-platform/            Spark Bronze/Silver/Gold, DQ, generator, backfill
-infra/docker/               Compose service configs (Grafana, Prometheus, MinIO, Redpanda, OTel)
-docs/                       Architecture, event catalog, data model, data pipeline, ADRs
+infra/docker/               Compose service configs (Grafana, Prometheus, MinIO, Redpanda, OTel,
+                             devtools — the shared ruff/mypy/pytest/bandit/pip-audit/pre-commit image)
+.github/workflows/           ci.yml — GitHub Actions, mirrors `make ci`
+docs/                       Architecture, event catalog, data model, data pipeline, ADRs,
+                             phase-5-engineering-quality.md
 scripts/                    compose_smoke_test.sh (make smoke)
-docker-compose.yml, Makefile, .env.example
+docker-compose.yml, Makefile, .env.example, .pre-commit-config.yaml
 PROJECT_STATUS.md, RISKS.md, DECISIONS.md, TEST_RESULTS.md
 ```
 
@@ -238,16 +268,28 @@ Full index of all 10 ADRs: `docs/adrs/README.md`.
   demo, first thing to change before any shared deployment (`RISKS.md` #14).
 - **Custom saga orchestrator, not a proven framework** — less battle-tested
   than Temporal; a deliberate scope tradeoff (`RISKS.md` #8).
+- **9 dependency CVEs accepted, not fixed** — mostly `starlette` (pulled in
+  transitively by `fastapi==0.115.0`); the real fix needs a coordinated
+  `fastapi`/`starlette` major-version upgrade across all four HTTP services,
+  verified incompatible with the current pin and scoped as its own
+  follow-up rather than a same-pass bump (`RISKS.md` #20).
+- **Coverage is statement-only, not branch**, despite `pyproject.toml`
+  declaring branch coverage on — each service's own test container lacks
+  the repo-root `pyproject.toml` at collection time
+  (`docs/phase-5-engineering-quality.md`).
 
 Full risk register, with status and mitigation for each: `RISKS.md`.
 
 ## Remaining roadmap
 
-Phases 6-13, not yet started: demand forecasting, a React/TypeScript ops
-dashboard, a failure laboratory (10 deterministic scenarios), security
-hardening, load testing, AWS infrastructure in Terraform (authored/validated
-only, per [ADR 0007](docs/adrs/0007-terraform-not-applied.md)), CI/CD, and
-final documentation/career deliverables. Full scope per phase:
+Phases 6-8, 11, and 13 not yet started: demand forecasting, a
+React/TypeScript ops dashboard, a failure laboratory (10 deterministic
+scenarios), AWS infrastructure in Terraform (authored/validated only, per
+[ADR 0007](docs/adrs/0007-terraform-not-applied.md)), and final
+documentation/career deliverables. Phases 9, 10, and 12 are partially
+done — a coverage threshold, security scanning, and a CI workflow landed in
+`docs/phase-5-engineering-quality.md`, but JWT/RBAC, load testing, and an
+actual GitHub-hosted CI run remain open. Full scope per phase:
 `PROJECT_STATUS.md`.
 
 ## License status

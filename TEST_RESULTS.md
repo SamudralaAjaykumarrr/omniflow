@@ -1,6 +1,6 @@
 # Test Results
 
-Last updated: 2026-07-25 (Phase 4 complete).
+Last updated: 2026-07-25 (Phase 5, Engineering quality, complete).
 
 This file is updated after every phase with real output from real commands;
 no number here is ever estimated or invented (see `RISKS.md` #4).
@@ -429,4 +429,91 @@ between iterations to prove a genuinely fresh environment starts clean):
   observed as expected `404 Not Found` responses from `order-service` in
   `fulfillment-orchestrator-consumer`'s logs (the synthetic order IDs don't
   exist in Postgres) and correctly produced zero dead letters. Harmless
+  cross-topic noise, not a functional break; documented in `RISKS.md`.
+
+### 2026-07-25 — Phase 5: Engineering quality
+
+Full narrative and rationale: `docs/phase-5-engineering-quality.md`. This
+entry is the raw evidence, from a real `make ci` run
+(`infra/docker/devtools/Dockerfile` built fresh, six suites executed with
+coverage instrumentation, five application images built) — 6m50s wall time.
+
+**Baseline (unchanged from Phase 4, re-verified): 167 passed, 0 failed, 0
+skipped** across all six suites (37 event-contracts + 34 order-service + 18
+inventory-service + 29 fulfillment-orchestrator + 9 api-gateway + 40
+data-platform).
+
+**Combined coverage** (`make coverage`, `coverage combine` across all six
+per-service data files, statement coverage — no branch data, since each
+service's own container runs pytest-cov without the repo-root
+`pyproject.toml` present, so `[tool.coverage.run] branch = true` isn't
+active at collection time; documented as a known limitation below):
+
+| Suite | Stmts | Miss | Cover |
+|---|---|---|---|
+| event-contracts | 321 | 41 | 87% |
+| order-service | 525 | 48 | 91% |
+| inventory-service | 469 | 33 | 93% |
+| api-gateway | 149 | 10 | 93% |
+| fulfillment-orchestrator | 762 | 294 | 61% |
+| data-platform | 767 | 423 | 45% |
+| **TOTAL** | **2993** | **849** | **71.6%** |
+
+`coverage.xml` (Cobertura format, `line-rate="0.7163"`) generated at repo
+root by the same run. `COV_THRESHOLD := 65` in the root Makefile — set below
+the measured 71.6%, not at it, so one new untested branch doesn't fail CI
+outright. The two low outliers are both dragged down by modules that need a
+live Kafka/HTTP/Spark stack to exercise, already covered by `make smoke`/the
+Phase 4 compose verification instead of unit tests: fulfillment-orchestrator's
+`main.py`/`middleware.py`/`routes.py`/`schemas.py`/`outbox_relay.py` (all
+0%, FastAPI wiring and the outbox relay loop) and data-platform's
+`generator.py`/`gold/runner.py`/`lag_poller.py` (all 0%, CLI entrypoints and
+a live-Kafka poller).
+
+**Formatting** (`make format-check`): 130 files, all already formatted.
+
+**Lint** (`make lint`): all checks passed.
+
+**Type checking** (`make typecheck`): all six packages pass clean —
+`event_contracts` (8 files), `order-service/app` (14), `inventory-service/app`
+(14), `fulfillment-orchestrator/app` (18), `api-gateway/app` (7),
+`data-platform/app` (19).
+
+**Pre-commit** (`make pre-commit`, `.pre-commit-config.yaml`, `--all-files`):
+`trailing-whitespace`, `end-of-file-fixer`, `check-merge-conflict`,
+`check-added-large-files`, `check-yaml`, `check-json`, `check-toml`,
+`detect-private-key`, `mixed-line-ending`, `ruff`, `ruff-format` — all
+Passed.
+
+**Security** (`make security`): `bandit -ll` (medium+ confidence/severity
+only) — 0 medium, 0 high across 5,878 scanned lines (29 low-severity
+informational findings, not blocking). `pip-audit --strict`, real query
+against the OSV.dev database — found 14 known CVEs across 4 packages
+(`pip`, `pytest`, `pyarrow`, `starlette`) on the initial run; `pip==26.1.2`
+pinned in every Dockerfile fixed pip's 5 outright (re-verified: `make test`
+still 167/167 passed after the bump). The remaining 9 IDs are accepted and
+individually justified in `RISKS.md` #20 (starlette's fixes need a
+fastapi major-version bump this codebase can't take in this pass — verified
+via `pip install fastapi==0.115.0 starlette==0.40.0` → `ResolutionImpossible`
+— pytest's and pyarrow's are both inapplicable to how this codebase actually
+uses them). Final `make security` run: `No known vulnerabilities found` on
+all six scan targets, `8/8/8/8/2/9` ignored IDs reported inline (visible,
+not silently dropped).
+
+**Docker Compose validation** (`make docker-validate`): `docker compose
+config --quiet` — valid.
+
+**Docker image builds** (`make docker-build`): `order-service`,
+`inventory-service`, `fulfillment-orchestrator`, `api-gateway`, `spark-gold`
+(data-platform) all built successfully.
+
+**`make ci`**: exit 0. All of the above, in one real run, in that order.
+
+**Known limitation carried into Phase 6+**: coverage is statement-only, not
+branch, for the reason above (each per-service container lacks the repo-root
+`pyproject.toml` at collection time). Making branch coverage real would mean
+either copying `pyproject.toml` into every service image or passing
+`--cov-branch` explicitly to every `pytest` invocation — deferred rather
+than done speculatively in this pass; tracked in
+`docs/phase-5-engineering-quality.md`.
   cross-topic noise, not a functional break; documented in `RISKS.md`.
