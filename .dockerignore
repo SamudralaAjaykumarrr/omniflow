@@ -1,0 +1,15 @@
+# Every service Dockerfile builds with the repo root as context (see
+# docker-compose.yml), so this applies globally. Keeps host-only build
+# artifacts out of every image's build context — smaller, faster, and
+# reproducible builds that don't accidentally bake in host state.
+**/node_modules/
+**/dist/
+**/coverage/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/__pycache__/
+.git/
+coverage-reports/
+htmlcov/
+*.pyc

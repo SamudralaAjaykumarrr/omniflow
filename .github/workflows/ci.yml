@@ -53,8 +53,11 @@ jobs:
       - name: Security scan (bandit + pip-audit)
         run: make security
 
+      - name: Ops dashboard quality gate (lint/format/typecheck/test/build)
+        run: make dashboard-validate
+
       - name: Validate docker-compose.yml
         run: make docker-validate
 
-      - name: Build application images
+      - name: Build application images (incl. ops-dashboard)
         run: make docker-build

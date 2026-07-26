@@ -5,7 +5,9 @@
 	inspect-silver-rejects inspect-late-events inspect-gold phase6-smoke phase6-validate clean-phase6 \
 	forecast-generate-data forecast-prepare forecast-train-baseline forecast-train-model \
 	forecast-evaluate forecast-select forecast-run forecast-inspect forecast-test forecast-smoke \
-	forecast-clean-safe forecast-validate
+	forecast-clean-safe forecast-validate \
+	dashboard-install dashboard-lint dashboard-format dashboard-format-check dashboard-typecheck \
+	dashboard-test dashboard-build dashboard-validate
 
 COMPOSE := docker compose
 RUFF := python:3.12-slim
@@ -13,6 +15,20 @@ RUFF_VERSION := 0.6.9
 PY_TEST_IMAGE := python:3.12-slim
 DEVTOOLS_IMAGE := omniflow-devtools:local
 COVERAGE_DIR := $(CURDIR)/coverage-reports/data
+
+# Phase 7 (ops dashboard): no host Node, same "throwaway container" pattern
+# as RUFF/PY_TEST_IMAGE above. node_modules lives in the bind-mounted
+# directory (persists across `make dashboard-*` runs same as any local npm
+# project would); --user + HOME=/tmp runs npm/tsc/vite as the host user
+# (not root), so node_modules and every generated file (dist/, *.tsbuildinfo)
+# come out host-owned, never needing a manual chown or sudo to touch
+# afterward — unlike forecast_artifacts's root-owned-by-default case
+# (Makefile's forecast-clean-safe comment), which this sidesteps entirely
+# rather than needing a matching throwaway-container cleanup target.
+NODE_IMAGE := node:22-alpine
+DASHBOARD_DIR := services/ops-dashboard
+DASHBOARD_RUN := docker run --rm --user "$(shell id -u):$(shell id -g)" -e HOME=/tmp \
+	-v $(CURDIR)/$(DASHBOARD_DIR):/app -w /app $(NODE_IMAGE)
 
 # Measured via `make coverage` against this branch (167 tests, six suites,
 # combined statement coverage): 71.6%. Set a few points under that, not at
@@ -41,6 +57,7 @@ demo: up
 	@echo "  Prometheus           -> http://localhost:9090"
 	@echo "  Grafana              -> http://localhost:3000 (anonymous admin access)"
 	@echo "  MinIO Console        -> http://localhost:9001 (data lake: bronze/silver/gold)"
+	@echo "  Ops Dashboard        -> http://localhost:3001"
 
 ## Build + start the full stack in the background.
 up:
@@ -258,6 +275,39 @@ forecast-clean-safe:
 ## Everything that gates Phase 6 (demand forecasting) as done: unit/pipeline tests, the smoke test, and the existing project CI gate.
 forecast-validate: forecast-test forecast-smoke ci
 
+# --- Phase 7: ops dashboard (React + TypeScript) ---------------------------
+
+## Install/refresh the dashboard's npm dependencies into the cached node_modules volume. Run once, or after editing package.json.
+dashboard-install:
+	$(DASHBOARD_RUN) npm install
+
+## ESLint (flat config) over the dashboard's TypeScript/TSX sources.
+dashboard-lint:
+	$(DASHBOARD_RUN) npm run lint
+
+## Auto-format the dashboard tree with Prettier (rewrites files in place).
+dashboard-format:
+	$(DASHBOARD_RUN) npm run format
+
+## Same as dashboard-format, but fails instead of rewriting — the CI-safe variant.
+dashboard-format-check:
+	$(DASHBOARD_RUN) npm run format:check
+
+## Static type checking (tsc --noEmit) for the dashboard.
+dashboard-typecheck:
+	$(DASHBOARD_RUN) npx tsc -b --noEmit
+
+## Unit + component tests (vitest + Testing Library), single run (no watch).
+dashboard-test:
+	$(DASHBOARD_RUN) npm test
+
+## Production build (tsc -b && vite build) — same build the Docker image runs; writes to services/ops-dashboard/dist.
+dashboard-build:
+	$(DASHBOARD_RUN) npm run build
+
+## Everything that gates Phase 7 (ops dashboard) as done, mirroring `ci`'s fail-fast ordering.
+dashboard-validate: dashboard-install dashboard-format-check dashboard-lint dashboard-typecheck dashboard-test dashboard-build
+
 ## Lint/format run in a throwaway container — no host Python toolchain is assumed (see PROJECT_STATUS.md).
 lint:
 	docker run --rm -v $(CURDIR):/repo -w /repo $(RUFF) sh -c "pip install --quiet ruff==$(RUFF_VERSION) && ruff check ."
@@ -380,9 +430,11 @@ docker-validate:
 ## Build every application service's image (not the infra images — postgres/
 ## redpanda/minio/prometheus/grafana/jaeger/otel-collector are pulled, not
 ## built here). event-contracts has no image of its own; it's installed as a
-## local dependency into the other five during their own builds.
+## local dependency into the other five during their own builds. ops-dashboard
+## (Phase 7) builds its own npm dependencies inside its own Dockerfile stage,
+## independent of dashboard-install's cached volume.
 docker-build:
-	$(COMPOSE) build order-service inventory-service fulfillment-orchestrator api-gateway spark-gold
+	$(COMPOSE) build order-service inventory-service fulfillment-orchestrator api-gateway spark-gold ops-dashboard
 
 ## Run pre-commit against every tracked file, not just staged ones — this is
 ## the "does the whole tree pass" check, distinct from the git-hook install
@@ -397,8 +449,9 @@ pre-commit:
 ## formatting/lint (seconds) before type-checking (tens of seconds) before
 ## tests+coverage (minutes) before security scanning before the Docker
 ## Compose/image validation that only matters once the code itself is known
-## good. Mirrors .github/workflows/ci.yml job-for-job.
-ci: format-check lint typecheck coverage security docker-validate docker-build
+## good. Mirrors .github/workflows/ci.yml job-for-job. dashboard-validate
+## (Phase 7) runs alongside the Python gates, same fail-fast ordering.
+ci: format-check lint typecheck coverage security dashboard-validate docker-validate docker-build
 	@echo ""
 	@echo "make ci: all Phase 5 quality gates passed."
 

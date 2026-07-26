@@ -1,11 +1,16 @@
 # Project Status
 
-Last updated: 2026-07-26 (Phase 6, Demand forecasting, complete and
-verified — see notes below).
+Last updated: 2026-07-26 (Phase 7, Ops dashboard, complete and verified —
+see notes below).
 
 ## Current phase
 
-**Phase 6 (Demand forecasting) complete and verified.** Data quality
+**Phase 7 (Ops dashboard) complete and verified.** React + TypeScript
+single-page app (`services/ops-dashboard`), 10 screens, served by nginx as
+a new `ops-dashboard` Compose service. Full detail:
+`docs/phase-7-ops-dashboard.md`.
+
+Phase 6 (Demand forecasting) complete and verified. Data quality
 checks/reporting (originally slotted as a separate Phase 5) were folded into
 Phase 4 — see below.
 
@@ -56,7 +61,7 @@ targets, 91 new tests, and an end-to-end local smoke test
 | 4. Data engineering platform | **Done** | Spark bronze/silver/gold into MinIO, synthetic generator, backfill/reprocessing tooling — see below and `TEST_RESULTS.md` |
 | 5. Data quality | **Done** | Executable checks + report — folded into Phase 4 (`app.dq`), see below |
 | 6. Demand forecasting | **Done** | Synthetic data, seasonal-naive baseline, `HistGradientBoostingRegressor` secondary model, chronological evaluation, champion selection, future forecasts — see below and `TEST_RESULTS.md` |
-| 7. Ops dashboard | Not started | React + TypeScript, 10 screens |
+| 7. Ops dashboard | **Done** | React + TypeScript, 10 screens, nginx reverse proxy, no backend changes — see below and `docs/phase-7-ops-dashboard.md` |
 | 8. Failure laboratory | Not started | 10 deterministic failure scenarios |
 | 9. Security hardening | Partially pulled forward | Dependency/SAST scanning (bandit + pip-audit) done — see `docs/phase-5-engineering-quality.md`; JWT/RBAC finalization, audit events still not started |
 | 10. Testing completion + load test | Partially pulled forward | Coverage threshold (65%, measured 71.6%) + `coverage.xml` done — see `docs/phase-5-engineering-quality.md`; load test tooling still not started |
@@ -309,6 +314,74 @@ restated at the top of each phase's own PR/commit as it lands.
     145 — 91 new forecasting tests) — see `TEST_RESULTS.md` for the full
     breakdown; combined coverage rose from 71.1% to 73.4%
 
+- **Phase 7 application code** (branch `phase-7-ops-dashboard`, see
+  `docs/phase-7-ops-dashboard.md` for full detail):
+  - `services/ops-dashboard` — **new service**: Vite + React 19 + TypeScript
+    single-page app, `react-router-dom` v7 (plain client-side mode — no
+    RSC/SSR/data-router loaders), 10 screens (Overview, Orders + detail,
+    Inventory & Fulfillment Nodes, Saga Monitor, Dead Letter Queue,
+    Observability, Data Quality, Data Platform, Demand Forecasting, Failure
+    Laboratory preview)
+  - `src/api/` — typed client (`client.ts`'s `get`/`post` + `ApiError`/
+    `NetworkError`) hand-mirroring the real Pydantic response models from
+    order-service/inventory-service/fulfillment-orchestrator; `metrics.ts`
+    wraps Prometheus's own HTTP query API; `mock/` holds clearly-labeled
+    fallback fixtures (DQ report, Gold datasets, forecast curve, failure-lab
+    catalog) for the three screens with no browser-facing read API yet
+  - `src/hooks/useAsync.ts` — shared loading/error/success/polling hook used
+    by every screen; `useTrackedOrders.ts` — localStorage-backed order-ID
+    tracking (Order Service has no list-all endpoint, confirmed before
+    building anything — see `docs/phase-7-ops-dashboard.md`)
+  - `src/components/` — layout (`AppShell`/`Sidebar`/`TopBar`), common
+    (`StatCard`, `StatusBadge`, `DataTable`, `LoadingState`/`EmptyState`/
+    `ErrorState`, `MockDataNotice`, hand-rolled SVG `BarChart`/`LineChart`
+    per the dataviz-skill palette/marks/interaction rules), forms
+    (`CreateOrderForm`, `CancelOrderForm`, `StockCheckForm`)
+  - `nginx.conf`/`proxy_params.conf` — reverse-proxies `/gw/`,
+    `/inventory-api/`, `/orchestrator-api/`, `/prom-api/` to the real
+    containers on the Compose network, same-origin (no backend CORS
+    changes needed); proxy targets resolved via Docker's embedded DNS at
+    **request time** (`resolver 127.0.0.11` + a `set $upstream_x ...`
+    variable per location), not once at nginx startup — three real bugs
+    found and fixed, the second and third only by actually running the
+    full stack: (1) a bare `proxy_pass http://api-gateway:8000/;` makes
+    nginx refuse to start at all if that hostname isn't resolvable yet,
+    which would take down the static SPA too over one not-yet-ready
+    dependency; (2) once live against real upstreams, the variable form
+    doesn't auto-strip a location's matched prefix the way a literal one
+    does, so every proxied request 404'd until each location got its own
+    `rewrite ... break` (ordered *before* `set` — `break` halts every
+    later rewrite-phase directive in the same location); (3) with (1) and
+    (2) fixed and real traffic flowing, `docker compose ps` still reported
+    the container unhealthy — nginx only binds IPv4 but this image's
+    `wget` resolves `localhost` to `::1` first, so both the Dockerfile's
+    `HEALTHCHECK` and `docker-compose.yml`'s overriding `healthcheck:`
+    block needed to query `127.0.0.1` explicitly instead — see
+    `docs/phase-7-ops-dashboard.md`/`RISKS.md` #27/`DECISIONS.md` for the
+    full writeup
+  - `Dockerfile` — multi-stage (`node:22-alpine` build, `nginx:1.27-alpine`
+    serve)
+  - `docker-compose.yml` — `ops-dashboard` service added, published on
+    `3001` (`3000` is Grafana's), healthcheck, depends on
+    api-gateway/inventory-service/fulfillment-orchestrator/prometheus all
+    healthy
+  - Root `.dockerignore` — **new** (excludes `node_modules/`, `dist/`,
+    Python cache dirs from every service's build context)
+  - `Makefile` — `dashboard-install`/`dashboard-lint`/`dashboard-format`/
+    `dashboard-format-check`/`dashboard-typecheck`/`dashboard-test`/
+    `dashboard-build`/`dashboard-validate` targets added, run inside
+    `node:22-alpine` throwaway containers as the host UID/GID (no host
+    Node, no root-owned generated files); `ci` and `docker-build` extended
+    to include the dashboard
+  - `.github/workflows/ci.yml` — dashboard quality-gate steps added,
+    mirroring `make ci`'s new ordering
+  - 50 new passing tests (vitest + React Testing Library, 14 files) — see
+    `TEST_RESULTS.md`
+  - No existing service's application code changed — every table/route/
+    schema in Phases 1-6 is untouched; only `docker-compose.yml`,
+    `Makefile`, `.github/workflows/ci.yml`, and the new root
+    `.dockerignore` were touched outside `services/ops-dashboard/`
+
 ## Environment notes (relevant to every future phase)
 
 Host has Docker 29.6.2 + Compose v5.3.1, 8 CPUs, 15Gi RAM, ~950G disk. No
@@ -326,9 +399,12 @@ individual queries outright, not just slowed them down.
 
 ## Next action
 
-Begin Phase 7: Ops dashboard (React + TypeScript, 10 screens). Phase 5
-(Data quality) is done, folded into Phase 4; Phase 6 (Demand forecasting)
-is now done (this document's separate note above). Engineering-quality
-tooling is also done for the slice it covers; JWT/RBAC (rest of Phase 9),
-load-test tooling (rest of Phase 10), an actual GitHub-hosted CI run (rest
-of Phase 12), and Terraform (Phase 11) remain untouched.
+Begin Phase 8: Failure laboratory (10 deterministic failure scenarios).
+Phase 7 (Ops dashboard) is now done (this document's separate note above);
+its Failure Laboratory screen is a clearly-labeled inert preview of the
+planned scenario catalog, ready to be wired to Phase 8's real backend once
+it exists. Phase 5 (Data quality) is done, folded into Phase 4; Phase 6
+(Demand forecasting) is done. Engineering-quality tooling is also done for
+the slice it covers; JWT/RBAC (rest of Phase 9), load-test tooling (rest of
+Phase 10), an actual GitHub-hosted CI run (rest of Phase 12), and Terraform
+(Phase 11) remain untouched.

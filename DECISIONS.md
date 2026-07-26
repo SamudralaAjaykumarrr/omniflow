@@ -5,6 +5,128 @@ architectural decisions get a full ADR under `docs/adrs/`; this log also
 captures smaller in-flight calls that don't warrant a standalone ADR, plus
 pointers to the ADRs when they do.
 
+## 2026-07-26 — Phase 7: Ops dashboard
+
+- **No backend changes, by design.** The roadmap scopes this phase as the
+  React/TypeScript frontend; every existing service's routes/schemas/tables
+  are untouched. Where the dashboard would have benefited from a new
+  endpoint (an order-listing route; a MinIO read API for DQ/Gold/forecast
+  output), the gap was documented instead of quietly expanding scope — see
+  `docs/phase-7-ops-dashboard.md` "Missing API contracts."
+- **Same-origin nginx reverse proxy, not a new backend service or CORS
+  changes.** The dashboard's own nginx proxies `/gw/`, `/inventory-api/`,
+  `/orchestrator-api/`, `/prom-api/` to the real containers on the Compose
+  network. This means the browser never makes a cross-origin request, so
+  no existing FastAPI service needed a CORS middleware change to support
+  a browser client — a smaller, more contained change than the
+  alternative (adding `CORSMiddleware` to four services).
+- **Two real bugs in the nginx proxy, found in two different ways — the
+  second only by actually running the full stack, not by the standalone
+  smoke test that caught the first.**
+  1. A plain `proxy_pass http://api-gateway:8000/;` resolves that hostname
+     once at nginx **startup**, and nginx refuses to start at all
+     ("host not found in upstream") if it isn't resolvable yet — which
+     would have taken down the whole dashboard, including its static SPA,
+     over one not-yet-ready dependency, and made the image impossible to
+     smoke-test in isolation. Found by literally trying to `docker run`
+     the built image standalone (no other containers on its network)
+     before wiring it into `docker-compose.yml` — `nginx -t` failed with
+     exactly that error. Fixed by assigning each proxy target to a
+     variable with `resolver 127.0.0.11` (Docker's embedded DNS) declared
+     once, deferring resolution to request time.
+  2. Once wired into `docker-compose.yml` and actually run against the
+     live stack (`docker compose up`, real `api-gateway`/
+     `inventory-service`/`fulfillment-orchestrator`/`prometheus`
+     containers) — a check the standalone smoke test structurally
+     couldn't do, since it had no real upstream to be wrong against —
+     every proxied request 404'd: nginx only auto-strips a location's
+     matched prefix for a *literal* `proxy_pass` target, not a *variable*
+     one, so `GET /gw/healthz` reached `api-gateway` as literally
+     `/gw/healthz`. The first attempted fix (`rewrite ^/gw/(.*)$ /$1
+     break;` placed *after* the `set` line) made it worse — every request
+     started 500-ing with "using uninitialized `upstream_gateway`
+     variable" — because `break` halts every remaining rewrite-phase
+     directive in that location, `set` included, if `set` comes after it.
+     Fixed for real by ordering `set` *before* `rewrite ... break` in
+     every location.
+  Verified directly, in both directions: `nginx -t` failed with the exact
+  "host not found in upstream" error before fix 1 and passed after;
+  `docker run` of the standalone image served `/`/SPA routes with `200`
+  and `/gw/healthz` with a `502` (not a crash) with no upstreams reachable;
+  and — only possible after fix 2 — a real order created and read back
+  through `/gw/api/orders`, real fulfillment nodes/saga instances/dead
+  letters through their own proxied paths, and a real Prometheus `up`
+  query through `/prom-api/`, all against the actual `docker compose up`
+  stack, not a mocked one.
+- **A third bug, found only after the first two were fixed and traffic was
+  already flowing correctly**: `docker compose ps` still reported
+  `ops-dashboard` unhealthy. nginx binds IPv4 only; this image's `wget`
+  resolves `localhost` to `::1` first — confirmed directly
+  (`wget http://127.0.0.1:80` inside the container: OK;
+  `wget http://[::1]:80`: connection refused) rather than assumed. Both
+  the Dockerfile's own `HEALTHCHECK` *and* `docker-compose.yml`'s separate,
+  overriding `healthcheck:` block had to be fixed to query `127.0.0.1`
+  explicitly — the compose-level one always wins under `docker compose
+  up`, so fixing only the Dockerfile's would have silently done nothing.
+  Also surfaced a Compose behavior worth naming: a plain `docker compose
+  up -d <service>` after a separate `docker compose build <service>` did
+  not reliably pick up the freshly built image against an
+  already-existing same-named container — `--force-recreate` was needed
+  to guarantee it. Full detail: `RISKS.md` #27.
+- **Unauthenticated dashboard, matching the backend's actual current
+  state.** ADR 0009 designed JWT/RBAC; Phase 9 never implemented it — no
+  `users` table, no login route exists anywhere in this repo yet. Building
+  a login screen with nothing real to authenticate against would be
+  exactly the kind of fabricated capability `CLAUDE.md` forbids. Every
+  action the dashboard can take (create/cancel an order, a stock check) is
+  exactly what an unauthenticated `curl` against these same endpoints
+  could already do, so this adds no new privilege — named as a limitation,
+  not hidden.
+- **Client-curated order tracking, not a new list-orders endpoint.**
+  `order-service` only exposes `GET /orders/{id}` and
+  `GET /orders/{id}/history` (confirmed by reading
+  `services/order-service/app/routes.py` before writing any frontend
+  code). Rather than add a list endpoint to a service this phase doesn't
+  otherwise touch, the Orders screen tracks order IDs in `localStorage` —
+  created via the dashboard's own form or entered manually — then fetches
+  each one's real, current state individually. Real data about real
+  orders, just client-curated instead of server-listed; labeled as such
+  directly in the UI.
+- **Mock data is never blended silently with real data.** Three screens
+  (Data Quality, Data Platform, and the forecast curve within Demand
+  Forecasting) have no backend read path yet (`docs/architecture.md`
+  itself names this "target state, not yet built"); every one of them
+  renders a persistent, visible `MOCK DATA` banner naming the specific gap.
+  The Demand Forecasting screen's champion-selection numbers are a third,
+  distinct category — real, measured, copied verbatim from this session's
+  own `TEST_RESULTS.md` — and are labeled as "measured, not live" rather
+  than either "mock" or "live."
+- **React 19 + `react-router-dom` v7, latest of both, not an older pin.**
+  Chosen deliberately even though `npm audit` flags advisories against
+  react-router — every currently-published version has at least one (see
+  `RISKS.md`); the latest version's single advisory (RSC-mode CSRF bypass)
+  is narrower and more clearly inapplicable to this app's plain
+  client-side `BrowserRouter` usage than the several SSR/data-router/RSC
+  advisories on older 6.x/7.x releases, so latest was the better choice,
+  not just the default one.
+- **Hand-rolled SVG charts (`BarChart`/`LineChart`), not a charting
+  library.** Kept the dependency surface small (matching this phase's
+  "zero-cost, minimal footprint" framing) while still meeting the dataviz
+  skill's mark/interaction rules (thin lines, rounded bar data-ends, a
+  hover/focus crosshair + tooltip, a legend once 2+ series are present) —
+  a charting library would have been more features than these ten
+  screens' actual chart needs (single/dual-series line charts, single-series
+  bar charts) justify.
+- **`--user "$(id -u):$(id -g)"` for every dashboard-related Docker
+  invocation** (Makefile targets and every ad hoc `docker run` during this
+  session), not root. A real problem hit directly, not anticipated in
+  advance: the first pass at `make dashboard-install`/`dashboard-build`
+  ran as root (Docker's default), leaving `dist/`, `*.tsbuildinfo`, and a
+  stray empty directory root-owned on the host — caught by explicitly
+  checking file ownership after the fact, not assumed clean. Fixed by
+  mapping the container user to the host UID/GID with `HOME=/tmp`
+  (npm needs a writable `$HOME` for its own cache) throughout.
+
 ## 2026-07-26 — Phase 6: Demand forecasting (the actual roadmap phase)
 
 - **This is the `PROJECT_STATUS.md` phase table's real Phase 6** — distinct
