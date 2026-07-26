@@ -5,6 +5,63 @@ architectural decisions get a full ADR under `docs/adrs/`; this log also
 captures smaller in-flight calls that don't warrant a standalone ADR, plus
 pointers to the ADRs when they do.
 
+## 2026-07-26 — Phase 6: Demand forecasting (the actual roadmap phase)
+
+- **This is the `PROJECT_STATUS.md` phase table's real Phase 6** — distinct
+  from the `phase-6-streaming-data-platform` branch above, which reused the
+  number by coincidence (that branch hardened Phase 4's platform). See
+  [ADR 0006](docs/adrs/0006-forecasting-scope.md) for the scope decision
+  (baseline first, lightweight secondary model) made before this landed.
+- **Synthetic history, not real event-catalog data, is the primary
+  dataset** — `order.created`'s real item payload (`OrderItemData`) has no
+  location field at all (confirmed by re-reading `app.gold.queries`'s
+  module docstring and `docs/event-catalog.md` before building anything),
+  so a SKU x location x date grain cannot be derived from what the system
+  actually produces yet, and this repo's live data volume is whatever a
+  smoke test happened to generate — nowhere near enough to evaluate a model
+  meaningfully either way. A deterministic seeded generator
+  (`app.forecasting.synthetic`) stands in, exactly as the phase spec
+  anticipates for this situation, and is documented as synthetic throughout
+  — never dressed up as real.
+- **`HistGradientBoostingRegressor` over `GradientBoostingRegressor`/
+  `RandomForestRegressor`** specifically for native missing-value support:
+  every SKU x location series' first `max(lag_days)` rows are legitimately
+  `NaN` (there's no history yet), and `HistGradientBoostingRegressor`
+  handles that without an imputer step — a real, concrete reason for the
+  choice, not just "it's the newer one."
+- **WAPE, not MAPE, as the scale-aware business metric.** The synthetic
+  generator deliberately includes intermittent-demand SKUs with genuine
+  zero-demand days (section B's spec requirement); MAPE's per-row division
+  by a zero actual is undefined for those rows, while WAPE aggregates
+  numerator and denominator across the whole group before dividing. MAPE
+  is not reported at all, per the phase spec's own instruction to only
+  include it when zero-handling is "explicitly correct and documented" —
+  it isn't, here, so it's omitted rather than special-cased.
+- **A real ordering bug, found by a test written specifically to catch it,
+  not by inspection**: the recursive multi-step future-forecast rollout
+  (`app.forecasting.forecast.generate_future_forecast`) initially wrote
+  each step's predictions back into the working series by *position*,
+  assuming two independently-sorted DataFrames shared the same row order.
+  They don't, in general. Fixed by keying predictions to `(sku,
+  location_id)` explicitly. Full writeup: `RISKS.md` #23.
+- **Local model artifacts need a bind-mounted volume, not just a relative
+  path, to survive across the separate `make forecast-train-baseline` /
+  `make forecast-evaluate` container invocations** — each `docker compose
+  run --rm` is a fresh container, so a path relative to the image's own
+  filesystem (no volume) would vanish with the container that wrote it.
+  `docker-compose.yml`'s `spark-gold` service now bind-mounts
+  `./services/data-platform/forecasting_artifacts` to that same path.
+  Verified directly: trained a baseline and secondary model in two
+  separate `docker compose run` invocations, then loaded and evaluated
+  both in two more, in a fourth invocation — real cross-container
+  persistence, not assumed.
+- **Both models trained and evaluated in this session's own validation run**
+  (small deterministic smoke-test config, seed 99, 4 SKUs x 2 locations):
+  seasonal-naive baseline WAPE 0.298, `HistGradientBoostingRegressor` WAPE
+  0.154 — the secondary model won honestly on this run's data, not by
+  assumption; champion selection reported it with the measured numbers,
+  not a hardcoded "the fancier model wins."
+
 ## 2026-07-26 — Phase 6: Streaming data-platform hardening
 
 - **This branch's name reuses "Phase 6", but its scope is not the

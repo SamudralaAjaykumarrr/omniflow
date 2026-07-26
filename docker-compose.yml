@@ -370,6 +370,16 @@ services:
       METRICS_PORT: "9108"
     expose:
       - "9108"
+    # Phase 6 (demand forecasting): `app.forecasting`'s local model
+    # artifacts (section H) are plain local disk, not MinIO — bind-mounted
+    # here so `make forecast-train-baseline`/`forecast-train-model` and a
+    # later, separate `make forecast-evaluate`/`forecast-select`/
+    # `forecast-forecast` invocation (each its own throwaway `docker compose
+    # run` container) still see the same artifact_dir. Gitignored; not a
+    # Docker named volume, so `make forecast-clean-safe` can remove it with
+    # a plain `rm -rf` like any other local dev output.
+    volumes:
+      - ./services/data-platform/forecasting_artifacts:/app/services/data-platform/forecasting_artifacts
     deploy:
       resources:
         limits:

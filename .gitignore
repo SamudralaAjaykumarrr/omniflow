@@ -22,6 +22,14 @@ build/
 data/
 *.parquet
 
+# Phase 6 (demand forecasting) — generated models, datasets, forecasts,
+# evaluation reports, and the local smoke-test scratch dir. Never committed;
+# regenerated deterministically from a seed by `make forecast-run`/
+# `make forecast-smoke`. Real production output lives in MinIO, not here.
+services/data-platform/forecasting_artifacts/
+services/data-platform/.forecast_smoke_output/
+*.joblib
+
 # Terraform
 .terraform/
 *.tfstate

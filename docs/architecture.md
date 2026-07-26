@@ -68,6 +68,18 @@ C4Container
   Rel(grafana, prometheus, "queries")
 ```
 
+**Forecasting Job, as actually built (Phase 6)**: the diagram above sketches
+it reading Gold directly; the real implementation
+(`services/data-platform/app/forecasting`) reads a deterministic synthetic
+history instead — the real `order.created` event payload has no location
+field to build a SKU x location grain from, and this repo's live event
+volume is too small to evaluate a model meaningfully either way (both
+confirmed before building anything, not assumed). It still reads/writes
+MinIO under the same bucket, in its own `forecasting/` prefix alongside
+`gold/`, not nested inside it. Full detail, including why:
+`docs/phase-6-demand-forecasting.md`. The Ops Dashboard container above
+remains not-yet-built target state.
+
 ## Order sequence (happy path)
 
 As built (see ADR 0010): the orchestrator's Kafka consumption is what

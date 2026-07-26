@@ -1,13 +1,13 @@
 # Project Status
 
-Last updated: 2026-07-26 (Phase 4 complete; Engineering-quality and
-streaming-data-platform-hardening work landed on top — see notes below).
+Last updated: 2026-07-26 (Phase 6, Demand forecasting, complete and
+verified — see notes below).
 
 ## Current phase
 
-**Phase 4 (Data engineering platform) complete and verified.** Data quality
+**Phase 6 (Demand forecasting) complete and verified.** Data quality
 checks/reporting (originally slotted as a separate Phase 5) were folded into
-this phase — see below. Phase 6 (Demand forecasting) not yet started.
+Phase 4 — see below.
 
 **Engineering-quality tooling** (branch `phase-5-engineering-quality`) has
 also landed: a measured test-coverage threshold + `coverage.xml`, zero-cost
@@ -27,10 +27,23 @@ gold jobs (closes `RISKS.md` #19), a real bug fix in Silver's dedup
 watermark found by running the pipeline end-to-end (`RISKS.md` #21), a
 data-lake inspection CLI, and an end-to-end Phase 6 smoke test
 (`make phase6-smoke`). Same naming-collision note as above: this branch's
-name reuses "Phase 6" from the table below by coincidence — the table's
-actual Phase 6 (Demand forecasting) is still Not Started; the platform
+name reused "Phase 6" from the table below by coincidence — the platform
 this branch hardens was built in Phase 4, not this branch. Full detail:
 `docs/phase-6-streaming-data-platform.md`.
+
+**Demand forecasting** (branch `phase-6-demand-forecasting`) — **this is
+the table's actual Phase 6** — has landed: a deterministic synthetic
+demand-history generator (SKU x location x date grain), feature
+engineering with tested leakage safeguards, a seasonal-naive baseline, a
+`HistGradientBoostingRegressor` secondary model, chronological (never
+random) train/validation splitting plus rolling-origin walk-forward folds,
+MAE/RMSE/WAPE computed from real predictions, a documented measured
+champion-selection rule, recursive multi-step future forecasts, local
+model-artifact persistence (bind-mounted across separate container runs),
+a full CLI (`python -m app.forecasting.cli`), 12 new `make forecast-*`
+targets, 91 new tests, and an end-to-end local smoke test
+(`make forecast-smoke`) needing no live MinIO/Kafka. Full detail:
+`docs/phase-6-demand-forecasting.md`.
 
 ## Phase progress
 
@@ -42,7 +55,7 @@ this branch hardens was built in Phase 4, not this branch. Full detail:
 | 3. Observability | **Done** | Structured JSON logs w/ correlation IDs, OpenTelemetry distributed tracing (Jaeger, cross-Kafka-hop trace propagation), Prometheus metrics (every service + every background worker), Grafana dashboard, mypy type checking — see below and `TEST_RESULTS.md` |
 | 4. Data engineering platform | **Done** | Spark bronze/silver/gold into MinIO, synthetic generator, backfill/reprocessing tooling — see below and `TEST_RESULTS.md` |
 | 5. Data quality | **Done** | Executable checks + report — folded into Phase 4 (`app.dq`), see below |
-| 6. Demand forecasting | Not started | Synthetic data, baseline + secondary model |
+| 6. Demand forecasting | **Done** | Synthetic data, seasonal-naive baseline, `HistGradientBoostingRegressor` secondary model, chronological evaluation, champion selection, future forecasts — see below and `TEST_RESULTS.md` |
 | 7. Ops dashboard | Not started | React + TypeScript, 10 screens |
 | 8. Failure laboratory | Not started | 10 deterministic failure scenarios |
 | 9. Security hardening | Partially pulled forward | Dependency/SAST scanning (bandit + pip-audit) done — see `docs/phase-5-engineering-quality.md`; JWT/RBAC finalization, audit events still not started |
@@ -240,6 +253,61 @@ restated at the top of each phase's own PR/commit as it lands.
     `clean-phase6` targets added
   - 181 passing tests across six suites (data-platform grew from 40 to 54)
     — see `TEST_RESULTS.md` for the full breakdown
+- **Phase 6 application code** (branch `phase-6-demand-forecasting`, see
+  `docs/phase-6-demand-forecasting.md` for full detail):
+  - `services/data-platform/app/forecasting/` — **new package**: a
+    pandas/scikit-learn batch pipeline (no Spark/JVM needed), grain SKU x
+    location x date:
+    - `synthetic.py` — deterministic seeded generator (trend, weekly/annual
+      seasonality, promos, stockouts, intermittent demand, rare anomalies,
+      a small generic holiday calendar)
+    - `features.py`/`quality.py` — calendar/lag/rolling feature engineering
+      with tested leakage safeguards, plus data-quality checks (grain
+      duplicates, missing/negative target, insufficient history, gaps,
+      all-zero series, split ordering, feature-leakage safeguard)
+    - `splits.py` — chronological single-cutoff split + expanding-window
+      rolling-origin walk-forward folds (never a random shuffle split)
+    - `baseline.py` (`SeasonalNaiveModel`) / `secondary_model.py`
+      (`HistGradientBoostingRegressor` wrapper) — same `fit`/`predict`
+      interface, evaluated uniformly
+    - `metrics.py` — MAE/RMSE/WAPE (WAPE chosen over MAPE for this
+      dataset's genuine zero-demand rows); `evaluate.py` — overall/by-SKU/
+      by-location/by-horizon breakdowns
+    - `select.py` — documented, measured champion-selection rule
+    - `forecast.py` — recursive multi-step future-forecast rollout (a real
+      row-ordering bug found by a dedicated regression test and fixed
+      before shipping — `RISKS.md` #23)
+    - `artifacts.py` — local joblib model + JSON metadata persistence
+      (training range, feature list, run ID)
+    - `io.py`/`paths.py` — local-or-MinIO Parquet/JSON I/O and the stable
+      `forecasting/` MinIO path layout
+    - `cli.py` — `generate-history`/`prepare`/`train-baseline`/
+      `train-secondary`/`evaluate`/`select`/`forecast`/`validate`/
+      `inspect`/`run` subcommands
+  - `app/config.py` — `forecasting_path` property added
+  - `infra/docker/minio/create-buckets.sh` — `forecasting` prefix added
+  - `docker-compose.yml` — `spark-gold` gained a bind-mounted
+    `forecasting_artifacts` volume (local model artifacts must survive
+    across separate `docker compose run` invocations of the granular
+    `make forecast-*` targets — verified directly, not assumed)
+  - `services/data-platform/requirements.txt` — `pandas`, `numpy`,
+    `scikit-learn`, `joblib` added (ADR 0006: pure-Python-wheel, no
+    compiled-system-toolchain dependencies)
+  - `scripts/forecast_smoke_test.sh` — **new**: every forecasting CLI
+    subcommand run in sequence against a small deterministic config,
+    redirected to a local scratch dir — no live Redpanda/MinIO/Postgres
+    needed, unlike `phase6_smoke_test.sh`
+  - `Makefile` — `forecast-generate-data`, `forecast-prepare`,
+    `forecast-train-baseline`, `forecast-train-model`, `forecast-evaluate`,
+    `forecast-select`, `forecast-run`, `forecast-inspect`, `forecast-test`,
+    `forecast-smoke`, `forecast-clean-safe`, `forecast-validate` targets
+    added; `typecheck` extended with `pandas`/`numpy`/`scikit-learn`/
+    `joblib` (a real gap found running it: mypy resolved a different,
+    unpinned transitive numpy version without this, producing 7 spurious
+    errors)
+  - 272 passing tests across six suites (data-platform grew from 54 to
+    145 — 91 new forecasting tests) — see `TEST_RESULTS.md` for the full
+    breakdown; combined coverage rose from 71.1% to 73.4%
 
 ## Environment notes (relevant to every future phase)
 
@@ -258,9 +326,9 @@ individual queries outright, not just slowed them down.
 
 ## Next action
 
-Begin Phase 6: Demand forecasting (synthetic data, baseline + secondary
-model), per ADR 0006. Phase 5 (Data quality) is done, folded into Phase 4.
-Engineering-quality tooling (this document's separate note above) is also
-done for the slice it covers; JWT/RBAC (rest of Phase 9), load-test tooling
-(rest of Phase 10), an actual GitHub-hosted CI run (rest of Phase 12), and
-Terraform (Phase 11) remain untouched.
+Begin Phase 7: Ops dashboard (React + TypeScript, 10 screens). Phase 5
+(Data quality) is done, folded into Phase 4; Phase 6 (Demand forecasting)
+is now done (this document's separate note above). Engineering-quality
+tooling is also done for the slice it covers; JWT/RBAC (rest of Phase 9),
+load-test tooling (rest of Phase 10), an actual GitHub-hosted CI run (rest
+of Phase 12), and Terraform (Phase 11) remain untouched.

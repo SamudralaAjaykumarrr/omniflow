@@ -15,7 +15,7 @@ else
   echo "created bucket: ${BUCKET}"
 fi
 
-for prefix in bronze bronze_rejects silver silver_rejects late_events gold checkpoints dq-reports; do
+for prefix in bronze bronze_rejects silver silver_rejects late_events gold checkpoints dq-reports forecasting; do
   mc mb -p "local/${BUCKET}/${prefix}" >/dev/null 2>&1 || true
 done
 
