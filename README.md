@@ -12,20 +12,21 @@ retailer.
 
 ## Current implementation status
 
-**Phases 1-6 of 13 are done and verified** (Phase 5, Data quality, is also
-done — folded into Phase 4). **Phases 7, 8, 11, 13 have not been started**;
+**Phases 1-7 of 13 are done and verified** (Phase 5, Data quality, is also
+done — folded into Phase 4). **Phases 8, 11, 13 have not been started**;
 parts of 9, 10, and 12 have been pulled forward as a separate engineering-
 quality pass, and the Phase 4 streaming data platform has had a hardening
 pass on top (see below).
 
 | Done now | Not started yet |
 |---|---|
-| Core domain (orders, inventory, API gateway) | Ops dashboard (React/TypeScript) |
-| Event platform (Redpanda, saga orchestrator, DLQ, replay) | Failure laboratory |
-| Observability (structured logs, tracing, metrics, Grafana) | JWT/RBAC, load testing, Terraform, career docs |
-| Data platform (Spark Bronze/Silver/Gold, data quality, backfill, malformed-event quarantine, Spark job metrics) | An actual GitHub-hosted CI run (workflow authored + verified locally only) |
+| Core domain (orders, inventory, API gateway) | Failure laboratory |
+| Event platform (Redpanda, saga orchestrator, DLQ, replay) | JWT/RBAC, load testing, Terraform, career docs |
+| Observability (structured logs, tracing, metrics, Grafana) | An actual GitHub-hosted CI run (workflow authored + verified locally only) |
+| Data platform (Spark Bronze/Silver/Gold, data quality, backfill, malformed-event quarantine, Spark job metrics) | |
 | Demand forecasting (synthetic history, seasonal-naive baseline, `HistGradientBoostingRegressor` secondary model, chronological evaluation, champion selection, future forecasts) | |
 | Measured coverage threshold, security scanning, pre-commit, CI (`docs/phase-5-engineering-quality.md`) | |
+| Ops dashboard (React/TypeScript, 10 screens, `docs/phase-7-ops-dashboard.md`) | |
 
 Data quality (checks + report) was originally scoped as its own phase but was
 folded into Phase 4, since the Spark plumbing it depends on was already in
@@ -62,11 +63,15 @@ Every number below comes from a command actually run against this repo (see
   WAPE 0.154) genuinely beat the seasonal-naive baseline (WAPE 0.298) and
   was selected champion by a documented rule using the measured numbers —
   full detail: `docs/phase-6-demand-forecasting.md`
-- **73.4% measured combined test coverage** across all six suites, a 65%
-  threshold enforced by `make coverage` and `coverage.xml` generated at the
-  repo root; `make security` (bandit + pip-audit) runs clean, with every
+- **73.4% measured combined test coverage** across all six Python suites, a
+  65% threshold enforced by `make coverage` and `coverage.xml` generated at
+  the repo root; `make security` (bandit + pip-audit) runs clean, with every
   accepted CVE individually justified in `RISKS.md` #20 — full detail:
   `docs/phase-5-engineering-quality.md`
+- **50 passing dashboard tests** (Vitest + React Testing Library, 14 files)
+  for the new `services/ops-dashboard` React/TypeScript app, plus a clean
+  `eslint`/`prettier --check`/`tsc --noEmit`/`vite build` — full detail:
+  `docs/phase-7-ops-dashboard.md`
 
 ## Verified engineering highlights
 
@@ -102,8 +107,10 @@ Order/Inventory directly over REST for each step
 Structured Streaming pipeline turns the same event catalog into
 Bronze/Silver/Gold datasets in MinIO
 ([ADR 0005](docs/adrs/0005-spark-local-mode.md)); Jaeger, Prometheus, and
-Grafana make the request/event path observable. Full container and sequence
-diagrams (including the target-state ops dashboard, not yet built):
+Grafana make the request/event path observable; a React + TypeScript ops
+dashboard (`services/ops-dashboard`) presents order/inventory/saga/DLQ/
+pipeline-health state to an ops user, reverse-proxied by its own nginx —
+see `docs/phase-7-ops-dashboard.md`. Full container and sequence diagrams:
 `docs/architecture.md`.
 
 ## Implemented capabilities
@@ -153,6 +160,23 @@ persistence. Full CLI (`python -m app.forecasting.cli`), 12
 `make forecast-*` targets, and an end-to-end local smoke test
 (`make forecast-smoke`, no live MinIO/Kafka needed). Full design:
 `docs/phase-6-demand-forecasting.md`, [ADR 0006](docs/adrs/0006-forecasting-scope.md).
+
+## Operations dashboard
+
+A React + TypeScript single-page app (`services/ops-dashboard`, Vite +
+`react-router-dom`), served by its own nginx image and reverse-proxying
+same-origin to the API Gateway, Inventory Service, Fulfillment Orchestrator,
+and Prometheus — no CORS changes needed on any backend, and no backend
+code changed at all. Ten screens: Overview, Orders (create/cancel/track,
+status-history timeline), Inventory & Fulfillment Nodes, Saga Monitor, Dead
+Letter Queue, Observability (live Prometheus queries), Data Quality, Data
+Platform, Demand Forecasting, and a Failure Laboratory preview (Phase 8
+isn't built yet, so this one's inert and clearly labeled). Six of the ten
+screens are fully live against real running services; the other four mix
+real measured numbers with clearly-labeled local fallback data where no
+read API exists yet (documented per-screen in
+`docs/phase-7-ops-dashboard.md`). 50 passing tests (Vitest + React Testing
+Library).
 
 ## Observability
 
@@ -238,8 +262,14 @@ make coverage     # all six suites w/ coverage, combined coverage.xml, threshold
 make security     # bandit (SAST) + pip-audit (dependency CVEs)
 make pre-commit   # pre-commit hooks against the whole tree
 make docker-validate  # docker compose config
-make docker-build     # build all five application images
-make ci           # the full local gate: format-check, lint, typecheck, coverage, security, docker
+make docker-build     # build all six application images (incl. ops-dashboard)
+make ci           # the full local gate: format-check, lint, typecheck, coverage, security, dashboard, docker
+
+make dashboard-install / dashboard-lint / dashboard-format / dashboard-format-check
+                  # ops dashboard: npm install / eslint / prettier --write / prettier --check
+make dashboard-typecheck / dashboard-test / dashboard-build
+                  # ops dashboard: tsc --noEmit / vitest run / production build
+make dashboard-validate  # all of the above, in fail-fast order
 make help         # list every target with its description
 ```
 
@@ -265,6 +295,7 @@ Available once `make demo` reports all services healthy:
 | Prometheus (metrics) | http://localhost:9090 |
 | Grafana (dashboards, anonymous admin access) | http://localhost:3000 |
 | MinIO Console (bronze/silver/gold browser) | http://localhost:9001 |
+| Ops Dashboard | http://localhost:3001 |
 
 ## Repository structure
 
@@ -276,13 +307,14 @@ services/
   fulfillment-orchestrator/ Saga engine, node scoring, payment sim, DLQ, replay
   event-contracts/         Shared Kafka helpers, schemas, logging/tracing/metrics setup
   data-platform/            Spark Bronze/Silver/Gold, DQ, generator, backfill, forecasting
+  ops-dashboard/            React + TypeScript ops dashboard, nginx reverse proxy (Phase 7)
 infra/docker/               Compose service configs (Grafana, Prometheus, MinIO, Redpanda, OTel,
                              devtools — the shared ruff/mypy/pytest/bandit/pip-audit/pre-commit image)
 .github/workflows/           ci.yml — GitHub Actions, mirrors `make ci`
 docs/                       Architecture, event catalog, data model, data pipeline, ADRs,
-                             phase-5-engineering-quality.md
+                             phase-5-engineering-quality.md, phase-7-ops-dashboard.md
 scripts/                    compose_smoke_test.sh (make smoke)
-docker-compose.yml, Makefile, .env.example, .pre-commit-config.yaml
+docker-compose.yml, Makefile, .env.example, .pre-commit-config.yaml, .dockerignore
 PROJECT_STATUS.md, RISKS.md, DECISIONS.md, TEST_RESULTS.md
 ```
 
@@ -333,20 +365,27 @@ Full index of all 10 ADRs: `docs/adrs/README.md`.
   head — step-to-step prediction error can compound across the horizon.
   Both documented, not glossed over (`docs/phase-6-demand-forecasting.md`
   'Limitations').
+- **Ops dashboard is unauthenticated** (no JWT/RBAC backend exists yet —
+  Phase 9 remainder), **order listing is client-curated, not server-listed**
+  (Order Service has no list-all endpoint), **DLQ replay is shown as a CLI
+  command, not a working button**, and three of the ten screens (Data
+  Quality, Data Platform, part of Demand Forecasting) show clearly-labeled
+  local mock data pending a real MinIO read API. All named, not glossed
+  over, in `docs/phase-7-ops-dashboard.md` 'Limitations'.
 
 Full risk register, with status and mitigation for each: `RISKS.md`.
 
 ## Remaining roadmap
 
-Phases 7, 8, 11, and 13 not yet started: a React/TypeScript ops dashboard,
-a failure laboratory (10 deterministic scenarios), AWS infrastructure in
-Terraform (authored/validated only, per
+Phases 8, 11, and 13 not yet started: a failure laboratory (10 deterministic
+scenarios), AWS infrastructure in Terraform (authored/validated only, per
 [ADR 0007](docs/adrs/0007-terraform-not-applied.md)), and final
 documentation/career deliverables. Phases 9, 10, and 12 are partially
 done — a coverage threshold, security scanning, and a CI workflow landed in
 `docs/phase-5-engineering-quality.md`, but JWT/RBAC, load testing, and an
-actual GitHub-hosted CI run remain open. Full scope per phase:
-`PROJECT_STATUS.md`.
+actual GitHub-hosted CI run remain open. Phase 7 (React/TypeScript ops
+dashboard) is now done — see `docs/phase-7-ops-dashboard.md`. Full scope
+per phase: `PROJECT_STATUS.md`.
 
 ## License status
 

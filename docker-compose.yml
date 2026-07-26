@@ -240,6 +240,32 @@ services:
       timeout: 5s
       retries: 10
 
+  ops-dashboard:
+    build:
+      context: .
+      dockerfile: services/ops-dashboard/Dockerfile
+    ports:
+      - "3001:80"
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+      fulfillment-orchestrator:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      # 127.0.0.1, not localhost: nginx only binds IPv4, but this image's
+      # wget resolves "localhost" to ::1 first — see Dockerfile's own
+      # HEALTHCHECK comment (this compose-level block overrides that one;
+      # both must agree, found by hitting an "unhealthy" dashboard whose
+      # every proxied route was actually serving real traffic correctly).
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   jaeger:
     image: jaegertracing/all-in-one:1.60
     environment:

@@ -1,6 +1,6 @@
 # Test Results
 
-Last updated: 2026-07-26 (Phase 6, Demand forecasting, complete).
+Last updated: 2026-07-26 (Phase 7, Ops dashboard, complete).
 
 This file is updated after every phase with real output from real commands;
 no number here is ever estimated or invented (see `RISKS.md` #4).
@@ -768,3 +768,118 @@ test_generate_future_forecast_recursion_feeds_predictions_forward`'s
 `_Lag1Model` probe (asserts step 2's prediction exactly equals step 1's)
 before this ever shipped. Fixed by keying predictions to `(sku,
 location_id)` explicitly; the same test now passes.
+
+### 2026-07-26 — Phase 7: Ops dashboard
+
+All commands run via `make dashboard-*` (each a throwaway `node:22-alpine`
+container, host UID/GID, no host Node — see `docs/phase-7-ops-dashboard.md`).
+
+**`make dashboard-format-check`** (`prettier --check .`): clean — "All
+matched files use Prettier code style!"
+
+**`make dashboard-lint`** (`eslint .`, flat config incl.
+`eslint-plugin-react-hooks@7`'s stricter rules): clean, 0 errors, 0 warnings.
+
+**`make dashboard-typecheck`** (`tsc -b --noEmit`): clean, no output (no
+errors).
+
+**`make dashboard-test`** (`vitest run`): **50 passed, 0 failed**, 14 test
+files, ~5s wall time:
+
+```
+ Test Files  14 passed (14)
+      Tests  50 passed (50)
+```
+
+Coverage: api/client.ts, api/metrics.ts, hooks/useAsync.ts,
+hooks/useTrackedOrders.ts, components/common/{StatusBadge,DataTable,
+LoadingState,EmptyState,ErrorState,MockDataNotice,BarChart,LineChart},
+components/forms/{CreateOrderForm,CancelOrderForm}, pages/OverviewPage,
+pages/DataQualityPage, pages/FailureLabPage, and an App-level routing
+smoke test (all 10 nav links present, click-navigation, 404 fallback).
+
+**`make dashboard-build`** (`tsc -b && vite build`): clean —
+`dist/index.html` 0.63 kB, `dist/assets/index-*.css` 9.30 kB (gzip 2.54 kB),
+`dist/assets/index-*.js` 282.63 kB (gzip 88.13 kB), built in ~0.4-0.7s.
+
+**Docker image build** (`docker build -f services/ops-dashboard/Dockerfile
+-t omniflow-ops-dashboard:test .`, and again via `make docker-build` /
+`docker compose build ops-dashboard`): both succeeded — multi-stage
+`node:22-alpine` (build) → `nginx:1.27-alpine` (serve), final image
+75.7 MB.
+
+**Standalone container smoke test** (real bug #1 found and fixed — see
+`RISKS.md` #27/`DECISIONS.md`): `nginx -t` inside the built image failed
+before the fix (`[emerg] host not found in upstream "api-gateway"`) and
+passed cleanly after switching `proxy_pass` to resolver-backed variables.
+With the container then actually running standalone (`docker run -d -p
+18080:80 omniflow-ops-dashboard:test`, no other containers on its
+network):
+
+```
+index.html: 200
+spa route (/orders/abc): 200
+proxy /gw/healthz (no gateway running -> expect 502): 502
+```
+
+— the static SPA and client-side routing work with zero dependencies up,
+and an unreachable upstream degrades gracefully to a per-route 502 instead
+of crashing the whole server.
+
+**Real end-to-end verification against the live `docker compose up` stack**
+(real bug #2 found and fixed — see `RISKS.md` #27/`DECISIONS.md`; this is
+what the standalone smoke test above structurally could not catch, since
+it had no real upstream to be wrong against): brought up
+postgres/redpanda/minio/order-service/inventory-service/
+fulfillment-orchestrator/api-gateway/prometheus/ops-dashboard together via
+`docker compose up -d`, all reported healthy, then hit the dashboard's own
+published port (`3001`) directly, proxies included:
+
+```
+GET  /gw/healthz                          -> {"status":"ok"}
+GET  /inventory-api/fulfillment-nodes      -> [] (real, empty — no nodes seeded this session)
+GET  /orchestrator-api/saga-instances      -> real saga instances (persisted from prior sessions' Postgres volume)
+GET  /orchestrator-api/dead-letters        -> [] (real, empty)
+GET  /prom-api/api/v1/query?query=up       -> real Prometheus vector result (4 targets up)
+GET  /orders/some-id (SPA route)           -> 200
+POST /gw/api/orders (create) -> 201, real order persisted
+GET  /gw/api/orders/{id}                   -> same order, read back correctly
+GET  /gw/api/orders/{id}/history           -> real CREATED transition recorded
+```
+
+Every proxy path returns real data from the real service on the other
+side of it — not a mocked check, and not just the standalone container's
+static-file/502 behavior.
+
+**Real bug #3, found only after #1 and #2 were both already fixed and
+traffic was flowing correctly**: `docker compose ps` still reported
+`ops-dashboard` **unhealthy** despite every route above working. Root
+cause: nginx only binds IPv4 (`listen 80;`), but this image's `wget`
+resolves `localhost` to `::1` first — both the Dockerfile's own
+`HEALTHCHECK` and `docker-compose.yml`'s separate, overriding
+`healthcheck:` block were querying `http://localhost:80`, an address
+nginx never listens on, regardless of whether the service itself worked.
+Fixed by pointing both at `http://127.0.0.1:80` explicitly. Verified:
+`docker exec omniflow-ops-dashboard-1 wget -qO- http://127.0.0.1:80` — OK;
+`http://[::1]:80` — connection refused (confirms the diagnosis, not just
+the fix); after rebuilding and force-recreating the container,
+`docker compose ps` reports `omniflow-ops-dashboard-1  Up ... (healthy)`.
+
+**`make docker-validate`** (`docker compose config --quiet`): valid,
+including the new `ops-dashboard` service.
+
+**`make ci`**: full local gate (format-check, lint, typecheck, coverage
+across all six Python suites, security, `dashboard-validate`,
+docker-validate, docker-build) run against this branch — six-suite Python
+totals unchanged from Phase 6 (272 passed, 0 failed; data-platform's own
+145 reconfirmed by a direct rerun: `================= 145 passed, 2
+warnings in 175.20s (0:02:55) =================`), plus the 50 new
+dashboard tests above. One transient, environment-level failure was hit
+and is recorded here rather than silently retried away: a first `make ci`
+run failed at `test-data-platform` with a Docker Desktop/WSL2 bind-mount
+error ("no such file or directory" resolving `create-buckets.sh`'s bind
+source) — unrelated to any code in this phase (data-platform/minio-init
+were not touched); a `docker compose down` + `up -d minio` recreated the
+network cleanly and the identical `make test-data-platform` command then
+passed outright, confirming the failure was host/Docker-Desktop
+infrastructure flakiness, not a regression.
