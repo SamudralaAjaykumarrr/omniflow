@@ -386,3 +386,68 @@ def test_dedup_within_watermark_collapses_redelivered_event_id(spark, tmp_path):
     result = spark.sql("SELECT * FROM dedup_test").collect()
     assert len(result) == 2
     assert {r["event_id"] for r in result} == {"evt-1", "evt-2"}
+
+
+def test_dedup_watermark_on_ingested_at_survives_wide_occurred_at_swings(spark, tmp_path):
+    """Regression test for a real bug found running the Phase 6 smoke test
+    against real Kafka/MinIO volume: `order.shipped`'s `occurred_at` can
+    legitimately be up to an hour ahead of `order.created`'s (simulated
+    shipping delay, `app.generator.generate_order_lifecycle`). Watermarking
+    `dropDuplicatesWithinWatermark` on that business timestamp meant one
+    high-latency shipment's far-future `occurred_at_ts` advanced the
+    watermark, silently dropping a *later-processed, non-duplicate* event
+    whose `occurred_at_ts` was smaller — not quarantined, not counted late,
+    just gone (see DECISIONS.md). `app.silver.build_type_query` now
+    watermarks on `ingested_at` (real wall-clock ingestion time, which only
+    moves forward) instead — this proves that choice survives exactly the
+    scenario that broke the old one: a first micro-batch with a
+    far-future-dated event, followed by a second, distinct, present-dated
+    event, must not silently disappear."""
+    schema = StructType(
+        [
+            StructField("event_id", StringType()),
+            StructField("occurred_at_ts", TimestampType()),
+            StructField("ingested_at", TimestampType()),
+        ]
+    )
+    now = datetime(2026, 7, 1, 12, 0, 0, tzinfo=UTC)
+    far_future_shipped = ("evt-shipped-slow", now + timedelta(minutes=55), now)
+    # Ingested a few seconds after the first micro-batch — realistic
+    # processing-time gap, nowhere near DEDUP_WATERMARK (10 minutes).
+    normal_shipped = ("evt-shipped-fast", now + timedelta(minutes=2), now + timedelta(seconds=5))
+
+    # Both writes land as separate part-files directly under one flat
+    # directory (a plain file source only lists one level deep, no
+    # subdirectory recursion — same constraint test_restart.py's own
+    # comment notes) — two `.write()` calls, in this order, so the
+    # far-future row's file predates the normal row's file.
+    input_dir = tmp_path / "input"
+    spark.createDataFrame([far_future_shipped], schema=schema).write.mode("append").parquet(
+        str(input_dir)
+    )
+    spark.createDataFrame([normal_shipped], schema=schema).write.mode("append").parquet(
+        str(input_dir)
+    )
+
+    # maxFilesPerTrigger=1 forces two separate micro-batches within one
+    # availableNow run — this is what lets the first micro-batch's
+    # far-future event actually advance the watermark before the second
+    # micro-batch is evaluated against it, reproducing the real ordering.
+    stream_df = (
+        spark.readStream.schema(schema).option("maxFilesPerTrigger", 1).parquet(str(input_dir))
+    )
+    deduped = stream_df.withWatermark("ingested_at", DEDUP_WATERMARK).dropDuplicatesWithinWatermark(
+        ["event_id"]
+    )
+
+    query = (
+        deduped.writeStream.format("memory")
+        .queryName("watermark_survives_test")
+        .outputMode("append")
+        .trigger(availableNow=True)
+        .start()
+    )
+    query.awaitTermination()
+
+    result = spark.sql("SELECT * FROM watermark_survives_test").collect()
+    assert {r["event_id"] for r in result} == {"evt-shipped-slow", "evt-shipped-fast"}

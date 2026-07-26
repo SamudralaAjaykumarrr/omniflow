@@ -14,6 +14,15 @@ same job targets real S3 unchanged in the AWS deployment story.
 - Append-only, never updated or deleted. This is the system of record for
   "what did the bus actually carry" and the input to any reprocessing.
 - Partitioned by `event_type` and `date(occurred_at)`.
+- **Malformed-event handling** (Phase 6): a Kafka record whose `value`
+  isn't parseable JSON matching the envelope shape (or is empty) is routed
+  to a `bronze_rejects` path instead — kept with its raw Kafka coordinates,
+  raw string value, and a reason (`empty_kafka_value` or
+  `unparseable_or_empty_envelope`), partitioned by ingestion date only
+  (event time is unknown by definition for a malformed payload). Distinct
+  from Silver's `silver_rejects`, below, which quarantines a *parseable*
+  envelope that fails schema/business validation — never conflated. See
+  `docs/phase-6-streaming-data-platform.md` section A.
 
 ### Silver — validated, deduplicated, normalized
 - Reads Bronze (streaming), applies:
@@ -89,6 +98,35 @@ revenue or order counts — this is the concrete mechanism behind the
 dedup watermark has closed is not caught — documented as a known limitation,
 mitigated by keeping the watermark wider than the observed p99 redelivery
 delay).
+
+**Watermark column, and why (Phase 6)**: the dedup watermark is declared on
+`ingested_at` (Bronze's ingestion wall-clock time), not `occurred_at`
+(the event's own business timestamp) — a real bug, found running the
+pipeline end-to-end, not by inspection: `occurred_at` can legitimately swing
+far ahead of real time for some event types (`order.shipped`'s simulated
+shipping delay is up to 60 minutes after `order.created`'s), and Spark's
+watermark for a stateful operator drops **any** row (not just duplicates)
+whose watermark-column value trails an already-advanced watermark — a
+row that reaches the operator after a far-future-dated sibling has already
+advanced the watermark past it is silently dropped upstream of every sink,
+never quarantined, never counted late. `ingested_at` only moves forward
+with real processing time, so it can't be pushed ahead of itself by a
+business-modeled delay. Full writeup: `docs/phase-6-streaming-data-platform.md`
+section D, `RISKS.md` #21, `DECISIONS.md`.
+
+**`--once` mode's final batch can leave a real, non-self-healing gap**:
+verified directly, not assumed — a reconciliation gap left by the last
+`--once` micro-batch of a Silver run did not shrink after waiting 25+
+minutes (well past `DEDUP_WATERMARK`'s 10 minutes) with no new traffic and
+a repeated no-op `silver --once` run in between. `Trigger.AvailableNow()`
+gives no guaranteed subsequent trigger to flush a watermark-gated stateful
+operator's pending output once it decides there's no more source data.
+Not a regression of the fix above, and not data loss in the source/Bronze
+sense (Kafka and Bronze both still have it) — but the *streaming* Silver
+path can genuinely strand it until either new data arrives or
+`app.backfill silver --apply` (no watermark, unaffected) reprocesses it,
+which is exactly what this branch's own validation needed to do to reach
+a genuine `app.dq.report overall: PASS`. See `RISKS.md` #22.
 
 ## Checkpointing
 
@@ -170,19 +208,32 @@ gating check failed, so it's safe to wire into a scheduler directly.
 ## Synthetic event generator
 
 `app.generator` (`python -m app.generator [--orders N] [--dead-letters N]
-[--duplicate-rate R] [--late-rate R]`, or `make generate`) publishes a
-realistic, causally-chained stream of the 11 event-catalog event types
-directly onto Kafka, validated against `event_contracts.schemas` before
-publish — the same contract every real producer in this system is held to.
-Publishes onto the same real topics the real order-service/inventory-
-service/fulfillment-orchestrator consumers subscribe to (Bronze consumes
-the real event catalog either way), so those real consumers also see
-synthetic events — harmless (they 404 looking up a synthetic order ID that
-doesn't exist in Postgres, producing no dead letters), but expected noise
-in their logs when the generator has been run. `--duplicate-rate`/
-`--late-rate` deliberately exercise Silver's dedup and late-event paths
-end-to-end with real Kafka/Parquet, not just hand-built unit-test
-DataFrames.
+[--duplicate-rate R] [--late-rate R] [--malformed-rate R]`, or `make
+generate`) publishes a realistic, causally-chained stream of the 11
+event-catalog event types directly onto Kafka, validated against
+`event_contracts.schemas` before publish — the same contract every real
+producer in this system is held to. Publishes onto the same real topics the
+real order-service/inventory-service/fulfillment-orchestrator consumers
+subscribe to (Bronze consumes the real event catalog either way), so those
+real consumers also see synthetic events — harmless (they 404 looking up a
+synthetic order ID that doesn't exist in Postgres, producing no dead
+letters), but expected noise in their logs when the generator has been run.
+`--duplicate-rate`/`--late-rate` deliberately exercise Silver's dedup and
+late-event paths end-to-end with real Kafka/Parquet, not just hand-built
+unit-test DataFrames. `--malformed-rate` (Phase 6, default 0, opt-in)
+publishes an intentionally-broken raw payload directly (bypassing schema
+validation) to exercise Bronze's malformed-JSON quarantine the same way.
+
+## Spark job metrics (Phase 6)
+
+`app.bronze`/`app.silver`/`app.gold.runner` each start a standalone
+`prometheus_client` HTTP server on their `METRICS_PORT` (already declared in
+`docker-compose.yml`) and record `data_platform_batch_rows_total{layer,
+dataset,status}` and `data_platform_batch_duration_seconds{layer,dataset}`
+per micro-batch — closes `RISKS.md` #19. Scraped by Prometheus
+(`infra/docker/prometheus/prometheus.yml`) alongside every other service/
+worker. `app.lag_poller` is intentionally not instrumented this way — it's
+a lightweight pyarrow/s3fs loop, not a Spark job.
 
 ## Consumer lag and pipeline metrics
 

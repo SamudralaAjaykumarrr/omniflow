@@ -1,7 +1,7 @@
 # Project Status
 
-Last updated: 2026-07-25 (Phase 4 complete; Engineering-quality work landed
-on top — see note below).
+Last updated: 2026-07-26 (Phase 4 complete; Engineering-quality and
+streaming-data-platform-hardening work landed on top — see notes below).
 
 ## Current phase
 
@@ -19,6 +19,18 @@ phases' scope (coverage tooling from Phase 10, dependency/SAST scanning
 from part of Phase 9, CI from Phase 12) — none of those phases are marked
 Done below, since their full scope (JWT/RBAC, load-test tooling, etc.)
 isn't covered by this slice. Full detail: `docs/phase-5-engineering-quality.md`.
+
+**Streaming data-platform hardening** (branch
+`phase-6-streaming-data-platform`) has also landed: Bronze-level
+malformed-JSON quarantine, Prometheus metrics for the Spark bronze/silver/
+gold jobs (closes `RISKS.md` #19), a real bug fix in Silver's dedup
+watermark found by running the pipeline end-to-end (`RISKS.md` #21), a
+data-lake inspection CLI, and an end-to-end Phase 6 smoke test
+(`make phase6-smoke`). Same naming-collision note as above: this branch's
+name reuses "Phase 6" from the table below by coincidence — the table's
+actual Phase 6 (Demand forecasting) is still Not Started; the platform
+this branch hardens was built in Phase 4, not this branch. Full detail:
+`docs/phase-6-streaming-data-platform.md`.
 
 ## Phase progress
 
@@ -192,6 +204,42 @@ restated at the top of each phase's own PR/commit as it lands.
     accepted with individual justification (`starlette`'s fixes need a
     `fastapi` major-version bump verified incompatible with the current
     pin; `pytest`/`pyarrow`'s don't apply to how this codebase uses them)
+- **Streaming data-platform hardening** (branch
+  `phase-6-streaming-data-platform`, see
+  `docs/phase-6-streaming-data-platform.md` for full detail):
+  - `services/data-platform/app/bronze.py` — malformed-JSON quarantine
+    (`transform_to_bronze_rejects` -> new `bronze_rejects` MinIO prefix),
+    converted from a direct `.writeStream.format("parquet")` sink to
+    `foreachBatch` (matches Silver/Gold's existing pattern)
+  - `services/data-platform/app/metrics.py` — **new module**:
+    `prometheus_client`-backed `start_metrics_server`/`record_rows`/
+    `track_batch_duration`, wired into `app/bronze.py`/`app/silver.py`/
+    `app/gold/common.py`'s `main()`s and batch writers — closes `RISKS.md` #19
+  - `services/data-platform/app/silver.py` — **real bug fixed**: dedup
+    watermark moved from `occurred_at_ts` to `ingested_at` (see `RISKS.md`
+    #21/`DECISIONS.md` for the full root-cause writeup); ~64 historically-
+    dropped rows recovered via `app.backfill --apply` with explicit
+    confirmation
+  - `services/data-platform/app/dq/report.py` — Bronze read changed to
+    per-`event_type=` subdirectory (`app.bronze.read_bronze_batch`, unioned),
+    never the Bronze root — avoids a `_spark_metadata`-poisoned-root read
+    (same failure class as `RISKS.md` #18)
+  - `services/data-platform/app/inspect.py` — **new module**: MinIO
+    data-lake prefix inspection CLI (object count/bytes by partition,
+    sample keys), backs `make inspect-*`
+  - `services/data-platform/app/generator.py` — `--malformed-rate` added
+    (opt-in, default 0)
+  - `infra/docker/minio/create-buckets.sh` — `bronze_rejects` prefix added
+  - `infra/docker/prometheus/prometheus.yml` — `spark-bronze`/
+    `spark-silver`/`spark-gold` scrape targets added
+  - `scripts/phase6_smoke_test.sh` — **new**: end-to-end synthetic traffic
+    -> Bronze (twice, restart check) -> Silver -> Gold -> DQ report
+  - `Makefile` — `streaming-up`/`streaming-down`, `inspect-bronze`/
+    `inspect-bronze-rejects`/`inspect-silver`/`inspect-silver-rejects`/
+    `inspect-late-events`/`inspect-gold`, `phase6-smoke`, `phase6-validate`,
+    `clean-phase6` targets added
+  - 181 passing tests across six suites (data-platform grew from 40 to 54)
+    — see `TEST_RESULTS.md` for the full breakdown
 
 ## Environment notes (relevant to every future phase)
 

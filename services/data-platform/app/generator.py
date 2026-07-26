@@ -11,11 +11,14 @@ one before it), built and validated against `event_contracts.schemas`'
 this system is held to (`services/event-contracts/tests/test_contracts.py`).
 
 Also injects a configurable rate of duplicate redelivery (republishes an
-already-sent envelope unchanged, same `event_id`) and late arrival
-(backdates `occurred_at` past Silver's late-event threshold before publish)
-so a single generator run can exercise Silver's dedup and late-event paths
-end-to-end with real Kafka/Parquet, not just in isolated unit tests against
-hand-built DataFrames.
+already-sent envelope unchanged, same `event_id`), late arrival (backdates
+`occurred_at` past Silver's late-event threshold before publish), and
+malformed records (raw, intentionally-broken bytes published directly,
+bypassing schema validation) so a single generator run can exercise
+Silver's dedup/late-event paths and Bronze's malformed-JSON quarantine
+(`app.bronze.transform_to_bronze_rejects`) end-to-end with real
+Kafka/Parquet, not just in isolated unit tests against hand-built
+DataFrames.
 """
 
 from __future__ import annotations
@@ -293,12 +296,41 @@ def inject_anomalies(
     return output
 
 
+def publish_malformed(producer, topic: str) -> None:
+    """Publishes an intentionally-broken raw payload directly to `topic`,
+    bypassing `publish_envelope`'s schema validation entirely — simulates a
+    poison message from a misbehaving/foreign producer. Exercises Bronze's
+    malformed-JSON quarantine (`app.bronze.transform_to_bronze_rejects`)
+    end-to-end against real Kafka/Parquet."""
+    delivery_errors: list[str] = []
+
+    def _on_delivery(err, _msg) -> None:
+        if err is not None:
+            delivery_errors.append(str(err))
+
+    producer.produce(
+        topic,
+        key=str(uuid.uuid4()).encode("utf-8"),
+        value=b"{not-valid-json::synthetic-malformed-record",
+        on_delivery=_on_delivery,
+    )
+    still_queued = producer.flush(timeout=10.0)
+    if still_queued > 0 or delivery_errors:
+        logger.warning(
+            "synthetic malformed record to %s did not confirm delivery: still_queued=%s errors=%s",
+            topic,
+            still_queued,
+            delivery_errors,
+        )
+
+
 def run(
     *,
     order_count: int,
     dead_letter_count: int,
     duplicate_rate: float,
     late_rate: float,
+    malformed_rate: float = 0.0,
     kafka_bootstrap_servers: str,
 ) -> int:
     producer = build_producer(kafka_bootstrap_servers)
@@ -315,14 +347,19 @@ def run(
     )
 
     published = 0
+    malformed_published = 0
     for event in all_events:
         key = str(event.data.get("order_id", event.event_id))
         publish_envelope(producer, topic=event.event_type, key=key, envelope=event)
         published += 1
+        if random.random() < malformed_rate:
+            publish_malformed(producer, topic=event.event_type)
+            malformed_published += 1
     logger.info(
-        "published %s synthetic event(s) across %s topic(s)",
+        "published %s synthetic event(s) across %s topic(s), %s malformed record(s)",
         published,
         len({e.event_type for e in all_events}),
+        malformed_published,
     )
     return published
 
@@ -348,6 +385,14 @@ def main() -> None:
         help="Probability an event is backdated past Silver's late threshold.",
     )
     parser.add_argument(
+        "--malformed-rate",
+        type=float,
+        default=0.0,
+        help="Probability an additional raw, unparseable record is published alongside "
+        "each event, on the same topic (tests Bronze's malformed-JSON quarantine). "
+        "Opt-in (default 0) since it's an intentionally-broken payload, not real traffic.",
+    )
+    parser.add_argument(
         "--seed", type=int, default=None, help="Random seed, for reproducible runs."
     )
     args = parser.parse_args()
@@ -362,6 +407,7 @@ def main() -> None:
         dead_letter_count=args.dead_letters,
         duplicate_rate=args.duplicate_rate,
         late_rate=args.late_rate,
+        malformed_rate=args.malformed_rate,
         kafka_bootstrap_servers=settings.kafka_bootstrap_servers,
     )
 

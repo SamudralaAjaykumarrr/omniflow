@@ -4,7 +4,9 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from pyspark.sql.types import DateType, StringType, StructField, StructType, TimestampType
+from pyspark.sql.utils import AnalysisException
 
+from app.config import Settings
 from app.dq.checks import (
     check_duplicate_rate,
     check_freshness,
@@ -13,7 +15,7 @@ from app.dq.checks import (
     check_schema_rejection_rate,
     run_all_checks,
 )
-from app.dq.report import _read_layer_for_date
+from app.dq.report import _read_bronze_for_date, _read_layer_for_date
 
 _TYPE_ID_SCHEMA = StructType(
     [StructField("event_type", StringType()), StructField("event_id", StringType())]
@@ -159,3 +161,39 @@ def test_read_layer_for_date_filters_to_requested_date(spark, tmp_path):
     assert result is not None
     assert result.count() == 1
     assert result.collect()[0]["date"].isoformat() == "2026-07-01"
+
+
+def test_read_bronze_for_date_unions_present_event_types_and_skips_missing(spark, monkeypatch):
+    """Reads Bronze per `event_type=` subdirectory and unions them, rather
+    than a single read of the Bronze root — verifies the union/skip logic
+    directly (via a monkeypatched `read_bronze_batch`) without needing a
+    real S3A Bronze path. See `_read_bronze_for_date`'s docstring for why
+    the root itself is deliberately never read."""
+    present_schema = StructType(
+        [StructField("event_type", StringType()), StructField("event_id", StringType())]
+    )
+    present_df = spark.createDataFrame([("order.created", "e1")], schema=present_schema)
+
+    def fake_read_bronze_batch(
+        spark_arg, settings_arg, event_type, *, from_date=None, to_date=None
+    ):
+        if event_type == "order.created":
+            return present_df
+        raise AnalysisException("path not found")
+
+    monkeypatch.setattr("app.dq.report.read_bronze_batch", fake_read_bronze_batch)
+
+    result = _read_bronze_for_date(spark, Settings(), "2026-07-01")
+
+    assert result is not None
+    assert result.count() == 1
+    assert result.collect()[0]["event_type"] == "order.created"
+
+
+def test_read_bronze_for_date_returns_none_when_every_event_type_missing(spark, monkeypatch):
+    def fake_read_bronze_batch(*args, **kwargs):
+        raise AnalysisException("path not found")
+
+    monkeypatch.setattr("app.dq.report.read_bronze_batch", fake_read_bronze_batch)
+
+    assert _read_bronze_for_date(spark, Settings(), "2026-07-01") is None

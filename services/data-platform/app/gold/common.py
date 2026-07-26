@@ -10,11 +10,16 @@ MERGE support that plain Parquet doesn't have) — see docs/data-pipeline.md.
 
 from __future__ import annotations
 
+import logging
+
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.streaming import StreamingQuery
 
 from app.config import Settings
+from app.metrics import record_rows, track_batch_duration
+
+logger = logging.getLogger("data_platform.gold")
 
 
 def flatten_window(df: DataFrame, window_col: str = "window") -> DataFrame:
@@ -52,12 +57,17 @@ def write_gold_stream(
     already uses for exactly this reason."""
 
     def _write(batch_df: DataFrame, batch_id: int) -> None:
-        if batch_df.isEmpty():
-            return
-        writer = batch_df.write.mode("append")
-        if partition_cols:
-            writer = writer.partitionBy(*partition_cols)
-        writer.parquet(f"{settings.gold_path}/{name}")
+        with track_batch_duration("gold", name):
+            if batch_df.isEmpty():
+                output_count = 0
+            else:
+                output_count = batch_df.count()
+                writer = batch_df.write.mode("append")
+                if partition_cols:
+                    writer = writer.partitionBy(*partition_cols)
+                writer.parquet(f"{settings.gold_path}/{name}")
+        record_rows("gold", name, {"output": output_count})
+        logger.info("gold batch %s (%s): %s output rows", batch_id, name, output_count)
 
     writer = (
         df.writeStream.foreachBatch(_write)

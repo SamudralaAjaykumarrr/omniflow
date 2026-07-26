@@ -35,6 +35,10 @@ class Settings(BaseSettings):
         return f"s3a://{self.data_lake_bucket}/bronze"
 
     @property
+    def bronze_rejects_path(self) -> str:
+        return f"s3a://{self.data_lake_bucket}/bronze_rejects"
+
+    @property
     def silver_path(self) -> str:
         return f"s3a://{self.data_lake_bucket}/silver"
 

@@ -48,3 +48,21 @@ scrape_configs:
   - job_name: fulfillment-orchestrator-outbox-relay
     static_configs:
       - targets: ["fulfillment-orchestrator-outbox-relay:9105"]
+
+  # Spark bronze/silver/gold jobs — standalone prometheus_client exporters
+  # on the METRICS_PORTs docker-compose.yml already declared/exposed before
+  # this phase's work (RISKS.md #19), started by app.metrics.start_metrics_server
+  # in each job's main(). lag-poller has no exporter/scrape target: it's a
+  # lightweight pyarrow/s3fs loop, not a Spark job, and was out of #19's
+  # scope.
+  - job_name: spark-bronze
+    static_configs:
+      - targets: ["spark-bronze:9106"]
+
+  - job_name: spark-silver
+    static_configs:
+      - targets: ["spark-silver:9107"]
+
+  - job_name: spark-gold
+    static_configs:
+      - targets: ["spark-gold:9108"]
