@@ -306,7 +306,7 @@ dashboard-build:
 	$(DASHBOARD_RUN) npm run build
 
 ## Everything that gates Phase 7 (ops dashboard) as done, mirroring `ci`'s fail-fast ordering.
-dashboard-validate: dashboard-format-check dashboard-lint dashboard-typecheck dashboard-test dashboard-build
+dashboard-validate: dashboard-install dashboard-format-check dashboard-lint dashboard-typecheck dashboard-test dashboard-build
 
 ## Lint/format run in a throwaway container — no host Python toolchain is assumed (see PROJECT_STATUS.md).
 lint:
