@@ -1,9 +1,23 @@
 # Project Status
 
-Last updated: 2026-07-27 (Phase 10, load testing, complete and verified —
-see notes below).
+Last updated: 2026-07-27 (Phase 11, AWS infrastructure/Terraform, complete
+and verified — see notes below).
 
 ## Current phase
+
+**Phase 11 (AWS infrastructure, Terraform) complete and verified — authored
+and validated only, never applied (ADR 0007).** Realistic, modular
+Terraform under `infra/terraform/` (13 modules + `dev`/`prod` environments)
+mapping the full running stack onto ECS Fargate (all 13 application
+deployables), RDS PostgreSQL, MSK (IAM-auth managed Kafka), S3, EMR
+Serverless (Spark bronze/silver/gold, per ADR 0005's own named cloud
+target), ElastiCache Redis (modeled, not yet consumed by app code — see
+`RISKS.md` #13), an ALB, least-privilege IAM, Secrets Manager, and
+CloudWatch observability. `terraform fmt -check -recursive`,
+`terraform init -backend=false`, and `terraform validate` all pass with
+zero warnings, run through the official `hashicorp/terraform` Docker image
+— no AWS credentials used, no AWS API called, nothing planned/applied/
+destroyed. Full detail: `infra/terraform/README.md`.
 
 **Phase 10 (load testing) complete and verified.** k6 load/performance
 testing (branch `phase-10-load-testing`) against the real running stack:
@@ -93,7 +107,7 @@ targets, 91 new tests, and an end-to-end local smoke test
 | 8. Failure laboratory | **Done** | 10 deterministic failure scenarios, new `failure-lab` service, dashboard control panel — see below and `docs/phase-8-failure-laboratory.md` |
 | 9. Security hardening | **Done** | Dependency/SAST scanning (bandit + pip-audit) — see `docs/phase-5-engineering-quality.md`; JWT/RBAC (users table, bcrypt, role-ranked authorization, 401/403 boundary) — see below and `DECISIONS.md` "Phase 9" |
 | 10. Testing completion + load test | **Done** | Coverage threshold (65%, measured 71.6%) + `coverage.xml` — see `docs/phase-5-engineering-quality.md`; k6 load testing (5 profiles, real measured results) — see below and `docs/phase-10-load-testing.md` |
-| 11. AWS infrastructure (Terraform) | Not started | Authored + validated, never applied |
+| 11. AWS infrastructure (Terraform) | **Done** | Authored + validated (`fmt`/`init -backend=false`/`validate`, zero warnings), never applied — see below and `infra/terraform/README.md` |
 | 12. CI/CD | Partially pulled forward | `.github/workflows/ci.yml` authored and its steps verified locally via `make ci`; not yet exercised by an actual GitHub-hosted run — see `docs/phase-5-engineering-quality.md` |
 | 13. Documentation & career deliverables | Not started | Remaining docs, final review |
 
@@ -565,6 +579,81 @@ restated at the top of each phase's own PR/commit as it lands.
     existing replay tooling), all documented in
     `docs/phase-10-load-testing.md`/`DECISIONS.md`/`RISKS.md` #36-#38.
   - No Phase 1-9 application code was touched.
+- **Phase 11 application code** (AWS infrastructure, Terraform — see
+  `infra/terraform/README.md` for full detail):
+  - `infra/terraform/modules/` — **13 new modules**: `networking` (VPC, 2+
+    AZ public/private subnets, NAT gateway(s), S3 gateway endpoint,
+    ECR/Secrets Manager/CloudWatch Logs interface endpoints), `security`
+    (security groups, ingress always scoped to a source SG, never a CIDR,
+    except the ALB's own listener), `ecr` (7 repos, one per
+    `services/<name>` image), `iam` (shared ECS task-execution role + one
+    task role per logical service group, MSK IAM-auth permissions only for
+    Kafka-touching services, S3 permissions only for `lag-poller`),
+    `secrets` (Secrets Manager: JWT signing secret, seeded demo-user
+    passwords, RDS master password, all Terraform-`random`-generated),
+    `rds` (single PostgreSQL instance, Multi-AZ toggle, encrypted,
+    automated backups), `elasticache` (Redis — modeled for `RISKS.md` #13's
+    documented next step, not yet consumed by app code), `msk` (managed
+    Kafka, IAM auth, replacing Redpanda), `s3` (data-lake bucket, same
+    bronze/bronze_rejects/silver/silver_rejects/late_events/gold/
+    checkpoints/dq-reports/forecasting prefixes as
+    `infra/docker/minio/create-buckets.sh`), `alb` (host-based routing:
+    default Host -> api-gateway, `dashboard_hostname` -> ops-dashboard —
+    order-service/inventory-service/fulfillment-orchestrator/failure-lab
+    stay internal-only, same posture as `RISKS.md` #25/#34), `ecs`
+    (Fargate cluster, Cloud Map private DNS namespace, one task
+    definition + service per deployable — 13 total, CPU-target-tracking
+    autoscaling), `emr` (EMR Serverless application for Spark
+    bronze/silver/gold, per ADR 0005's own named cloud target — never
+    invoked, only the persistent application is provisioned),
+    `observability` (CloudWatch alarms: ALB 5xx, ECS CPU/memory, RDS
+    CPU/free storage, MSK broker disk; one dashboard; an SNS topic).
+  - `infra/terraform/environments/{dev,prod}` — each with its own
+    `main.tf` wiring every module, `services.tf` (the 13-deployable ECS
+    map, mirroring `docker-compose.yml`'s own service list — workers reuse
+    their parent service's image with a different `command`, exactly like
+    Compose's own `command:` overrides), `database_secrets.tf` (composes
+    one `DATABASE_URL` secret per service database from the single RDS
+    master user/password, matching each service's existing single-env-var
+    contract unchanged), `variables.tf`, `terraform.tfvars.example` (no
+    real secrets), a local-only `backend.tf` (remote S3+DynamoDB backend
+    documented, commented out, never created).
+  - `Makefile` — `tf-fmt-check`/`tf-fmt`/`tf-init`/`tf-validate`/
+    `tf-validate-all` targets added, all running the official
+    `hashicorp/terraform:1.9` Docker image (no host Terraform install, no
+    AWS credentials, no AWS API calls — `terraform init` does reach
+    `registry.terraform.io` to download the `aws`/`random` provider
+    plugins, called out plainly per ADR 0007). Deliberately not folded
+    into `ci`/`pre-commit` — a new network dependency those targets have
+    never had, out of this phase's scope to add.
+  - `docs/architecture.md` — the AWS deployment-target diagram (a Phase 0
+    sketch) updated to include failure-lab/ops-dashboard/EMR
+    Serverless/lag-poller/Cloud Map, matching what actually landed in
+    Phases 4-10, not just the original 4-service sketch.
+  - **Real validation, run in this session**: `terraform fmt -check
+    -recursive` clean; `terraform init -backend=false` succeeded for
+    every one of the 13 modules + 2 environments; `terraform validate`
+    passed with **zero warnings** for all 15 (one real S3 lifecycle-rule
+    schema warning — a `filter`/`prefix` requirement newly enforced by a
+    recent provider version — found and fixed during this same session,
+    not left in). No `terraform plan` or `terraform apply` was run against
+    any account; no AWS credentials exist in this session.
+  - **Explicit, named limitations** (not silently assumed solved — full
+    detail in `infra/terraform/README.md`): RDS creates only 1 of the 5
+    logical databases at instance-creation time (a documented manual
+    `psql` bootstrap step for the other 4); `ops-dashboard/nginx.conf`'s
+    DNS resolver would need changing from Docker's `127.0.0.11` to the
+    AWS VPC resolver `169.254.169.253` to actually proxy correctly in AWS;
+    `data-platform/app/s3.py` would need a small fallback to authenticate
+    to S3 via an ECS task's IAM role instead of explicit
+    `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`; no distributed-tracing
+    backend is wired up in AWS (CloudWatch replaces
+    Jaeger/Prometheus/Grafana for logs/metrics/alarms only); EMR
+    Serverless custom-image compatibility with the existing
+    `services/data-platform` image was not verified. None of these are
+    application-code changes made in this phase, per its "author
+    Terraform only" scope.
+  - No Phase 1-10 application code was touched.
 
 ## Environment notes (relevant to every future phase)
 
@@ -583,14 +672,14 @@ individual queries outright, not just slowed them down.
 
 ## Next action
 
-Phase 10 (load testing) is now done — see this document's separate note
-above and `docs/phase-10-load-testing.md`. Next: Phase 11 (AWS
-infrastructure, Terraform-only per ADR 0007), Phase 13 (final
-documentation/career deliverables), and the remaining scope of Phase 12 (an
-actual GitHub-hosted CI run — the workflow itself is authored and verified
-locally via `make ci`, see `docs/phase-5-engineering-quality.md`). Phase 5
-(Data quality) is done, folded into Phase 4; Phase 6 (Demand forecasting) is
-done; Phase 7 (Ops dashboard) is done; Phase 8 (Failure laboratory) is done;
-Phase 9 (Security hardening) is done; Phase 10 (load testing) is now fully
-done. An actual GitHub-hosted CI run (rest of Phase 12) and Terraform (Phase
-11) remain untouched.
+Phase 11 (AWS infrastructure, Terraform-only per ADR 0007) is now done —
+see this document's separate note above and `infra/terraform/README.md`.
+Next: Phase 13 (final documentation/career deliverables) and the remaining
+scope of Phase 12 (an actual GitHub-hosted CI run — the workflow itself is
+authored and verified locally via `make ci`, see
+`docs/phase-5-engineering-quality.md`). Phase 5 (Data quality) is done,
+folded into Phase 4; Phase 6 (Demand forecasting) is done; Phase 7 (Ops
+dashboard) is done; Phase 8 (Failure laboratory) is done; Phase 9 (Security
+hardening) is done; Phase 10 (load testing) is done; Phase 11 (Terraform) is
+now fully done. An actual GitHub-hosted CI run (rest of Phase 12) and final
+documentation/career deliverables (Phase 13) remain untouched.

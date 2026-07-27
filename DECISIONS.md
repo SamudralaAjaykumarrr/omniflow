@@ -5,6 +5,116 @@ architectural decisions get a full ADR under `docs/adrs/`; this log also
 captures smaller in-flight calls that don't warrant a standalone ADR, plus
 pointers to the ADRs when they do.
 
+## 2026-07-27 — Phase 11: AWS infrastructure (Terraform)
+
+Full detail: `infra/terraform/README.md`. Scope: author + validate realistic
+AWS Terraform per ADR 0007 — never plan/apply against a real account, never
+use real AWS credentials.
+
+- **ECS Fargate, not EKS**, for every application deployable — matches
+  `docs/architecture.md`'s own Phase 0 AWS diagram (which already named ECS
+  Fargate) and needs no cluster to size/patch/upgrade, consistent with this
+  project's "no paid services, single operator" framing (an EKS control
+  plane costs money by the hour regardless of load, and adds real
+  operational surface — node groups, cluster add-ons — this project has no
+  standing need for).
+- **EMR Serverless, not EMR-on-EC2 or a standalone Spark-on-Kubernetes
+  deployment**, for the Bronze/Silver/Gold jobs — ADR 0005 itself names
+  "EMR or Kubernetes-based Spark" as the cloud target without picking one;
+  Serverless is chosen specifically because this workload is bursty
+  (periodic batch/streaming-restart runs, not a permanently-hot cluster):
+  it scales to zero and bills per vCPU/memory-second actually consumed,
+  with no cluster to size in advance — a better cost/operational fit than
+  an always-on EMR-on-EC2 cluster for exactly this access pattern.
+- **Only api-gateway and ops-dashboard are reachable through the ALB** —
+  order-service, inventory-service, fulfillment-orchestrator, and
+  failure-lab stay internal-only (Cloud Map-discoverable by other services,
+  never internet-facing). This is not a new restriction invented for the
+  cloud target: it's the same posture `RISKS.md` #25/#34 already
+  established locally (those four services' own HTTP routes are trusted
+  only on the Docker network, called directly by the saga
+  orchestrator/failure-lab with no user JWT to present) — the AWS
+  Terraform reproduces that boundary rather than accidentally widening it
+  by exposing everything behind one load balancer.
+- **RDS's master password is Terraform-`random`-generated, not
+  AWS-managed** (`aws_db_instance.manage_master_user_password`) — a real
+  alternative considered and rejected specifically because it would have
+  meant either (a) building per-service `DATABASE_URL`s from separate
+  host/user/password parts, which would require an application-code change
+  (every service's `app/config.py` currently expects one composed
+  connection-string env var, and this phase's instructions forbid
+  unrelated application-code changes), or (b) reading the AWS-managed
+  secret's JSON fields back out via a data source and manually recomposing
+  a URL — more moving parts for no real security benefit over Terraform
+  owning the value directly in its own (still-encrypted, still
+  `sensitive`-marked) Secrets Manager secret. One shared master user across
+  all 5 databases matches the local Postgres container's own existing
+  convention (`.env.example`'s single "omniflow" role across every
+  `omniflow_*` database) — not a new pattern.
+- **RDS creates exactly 1 of 5 logical databases; the other 4 need a
+  documented manual `psql` step** — Terraform's AWS provider has no
+  resource for creating an additional database inside an existing RDS
+  instance without a live network connection, and this phase's hard
+  boundaries forbid Terraform (or this session) from making any such
+  connection. Named explicitly in `infra/terraform/README.md` rather than
+  silently left for a future session to discover the hard way.
+- **MSK with IAM authentication, not SASL/SCRAM or plaintext/TLS-only** —
+  avoids a second class of rotatable Kafka-specific credentials (SCRAM
+  usernames/passwords) on top of what Secrets Manager already holds; IAM
+  auth lets every ECS task's own task role double as its Kafka identity,
+  scoped least-privilege per topic/group via the same IAM policy documents
+  already used for S3.
+- **One shared ECS security group with self-referencing ingress**, not a
+  distinct security group per service — matches the real trust model the
+  local `docker-compose.yml` network already has today (every service can
+  already reach every other service by hostname on one shared Compose
+  network); a stricter per-service-pair security-group design would be
+  inventing a boundary this phase was never asked to design, and would
+  need re-deriving the exact legitimate call graph (gateway->order/
+  inventory, orchestrator->order/inventory, failure-lab->gateway/order/
+  inventory/orchestrator) as a maintained artifact separate from the
+  application code itself.
+- **A single Cloud Map private DNS namespace
+  (`<project>-<environment>.local`)** reproduces docker-compose's own
+  embedded-DNS "call it by service name" convenience
+  (`http://order-service:8000` locally becomes
+  `http://order-service.omniflow-dev.local:8000` in AWS) — chosen so
+  `services.tf`'s environment-variable values for
+  `GATEWAY_ORDER_SERVICE_URL`/`ORCHESTRATOR_INVENTORY_SERVICE_URL`/etc. are
+  a mechanical hostname substitution, not a redesign of how services find
+  each other.
+- **A generic, `for_each`-driven `modules/ecs`, not 13 hand-written
+  `aws_ecs_service` blocks** — every ECS deployable (5 FastAPI processes +
+  6 workers + ops-dashboard + lag-poller) differs only in image/command/
+  sizing/env vars/secrets/ALB attachment, all expressible as one object per
+  entry in a single map variable; a hand-written block per service would
+  have meant 13x the risk of one of them silently drifting from the
+  pattern (e.g. a forgotten log-group name or a copy-pasted wrong
+  task-role reference).
+- **CloudWatch, not a self-hosted Jaeger/Prometheus/Grafana port, is the
+  cloud target's observability backend** — `docs/architecture.md`'s own AWS
+  diagram already named CloudWatch (not the three local tools) before this
+  phase began; kept as-is rather than reinventing the local stack in AWS,
+  which would also mean standing up and operating three more services this
+  phase was never asked to Terraform. Named as a real, explicit
+  consequence: no distributed-tracing backend is wired up in this cloud
+  target (`OTEL_EXPORTER_OTLP_ENDPOINT` has nowhere reachable to point at)
+  — a genuine gap, not glossed over, tracked as a concrete follow-up
+  (`infra/terraform/README.md`, `RISKS.md`).
+- **A real bug found and fixed by actually running `terraform validate`,
+  not just `fmt`/authoring by inspection**: `modules/s3`'s
+  `aws_s3_bucket_lifecycle_configuration` had two rules
+  (`expire-noncurrent-versions`, `abort-incomplete-multipart-uploads`)
+  with no `filter`/`prefix` block (one had none at all; the other had an
+  empty `filter {}`) — a recent `hashicorp/aws` provider version now warns
+  that exactly one of `rule[].filter`/`rule[].prefix` is required, and
+  flagged both as "will be an error in a future version of the provider."
+  Fixed by adding an explicit `filter { prefix = "" }` (bucket-wide) to
+  both rules; `terraform validate` went from 2 warnings to a clean
+  zero-warning pass across all 13 modules and both environments —
+  caught by actually running validation, not assumed correct from reading
+  the HCL.
+
 ## 2026-07-27 — Phase 10: Load testing
 
 Full detail: `docs/phase-10-load-testing.md`. Scope: the load-test-tooling
