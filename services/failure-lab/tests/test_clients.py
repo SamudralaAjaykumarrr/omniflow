@@ -15,15 +15,53 @@ BASE = "http://test-service"
 
 @respx.mock
 def test_gateway_client_create_order_sends_idempotency_key_header():
+    respx.post(f"{BASE}/auth/login").mock(
+        return_value=Response(200, json={"access_token": "fake-token", "expires_in": 1800})
+    )
     route = respx.post(f"{BASE}/api/orders").mock(
         return_value=Response(201, json={"id": "abc", "status": "CREATED"})
     )
-    client = GatewayClient(BASE)
+    client = GatewayClient(BASE, service_email="svc@example.com", service_password="pw")
 
     result = client.create_order({"customer_id": "x"}, "key-1")
 
     assert result["id"] == "abc"
     assert route.calls.last.request.headers["Idempotency-Key"] == "key-1"
+    assert route.calls.last.request.headers["Authorization"] == "Bearer fake-token"
+
+
+@respx.mock
+def test_gateway_client_logs_in_once_and_reuses_cached_token_for_subsequent_calls():
+    login_route = respx.post(f"{BASE}/auth/login").mock(
+        return_value=Response(200, json={"access_token": "fake-token", "expires_in": 1800})
+    )
+    respx.post(f"{BASE}/api/orders").mock(
+        return_value=Response(201, json={"id": "abc", "status": "CREATED"})
+    )
+    client = GatewayClient(BASE, service_email="svc@example.com", service_password="pw")
+
+    client.create_order({"customer_id": "x"}, "key-1")
+    client.create_order({"customer_id": "y"}, "key-2")
+
+    assert login_route.call_count == 1
+
+
+@respx.mock
+def test_gateway_client_re_logs_in_once_token_is_expired():
+    login_route = respx.post(f"{BASE}/auth/login").mock(
+        # expires_in=0 -> immediately stale, forcing a fresh login on the
+        # very next call rather than reusing the cached (expired) token.
+        return_value=Response(200, json={"access_token": "fake-token", "expires_in": 0})
+    )
+    respx.post(f"{BASE}/api/orders").mock(
+        return_value=Response(201, json={"id": "abc", "status": "CREATED"})
+    )
+    client = GatewayClient(BASE, service_email="svc@example.com", service_password="pw")
+
+    client.create_order({"customer_id": "x"}, "key-1")
+    client.create_order({"customer_id": "y"}, "key-2")
+
+    assert login_route.call_count == 2
 
 
 @respx.mock

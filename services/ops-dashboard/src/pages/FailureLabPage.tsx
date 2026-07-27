@@ -5,6 +5,7 @@ import { EmptyState } from "../components/common/EmptyState";
 import { ErrorState } from "../components/common/ErrorState";
 import { StatusBadge } from "../components/common/StatusBadge";
 import { useAsync } from "../hooks/useAsync";
+import { useAuth } from "../auth/useAuth";
 import { listScenarios, resetScenario, triggerScenario } from "../api/failureLab";
 import type { ScenarioDetail } from "../api/types";
 
@@ -20,14 +21,15 @@ function formatTimestamp(value: string | null): string {
 interface ScenarioCardProps {
   detail: ScenarioDetail;
   isBusy: boolean;
+  canOperate: boolean;
   onTrigger: (scenarioId: string) => void;
   onReset: (scenarioId: string) => void;
 }
 
-function ScenarioCard({ detail, isBusy, onTrigger, onReset }: ScenarioCardProps) {
+function ScenarioCard({ detail, isBusy, canOperate, onTrigger, onReset }: ScenarioCardProps) {
   const { catalog, latest_run: latestRun, last_reset: lastReset, run_count: runCount } = detail;
   const isRunning = latestRun?.status === "RUNNING";
-  const disabled = isBusy || isRunning;
+  const disabled = isBusy || isRunning || !canOperate;
 
   return (
     <li className="scenario-card">
@@ -94,6 +96,8 @@ function ScenarioCard({ detail, isBusy, onTrigger, onReset }: ScenarioCardProps)
 }
 
 export function FailureLabPage() {
+  const { hasRole } = useAuth();
+  const canOperate = hasRole("ops");
   const [busyScenarios, setBusyScenarios] = useState<Set<string>>(new Set());
   const state = useAsync(listScenarios, [], { pollIntervalMs: POLL_INTERVAL_MS });
 
@@ -135,6 +139,13 @@ export function FailureLabPage() {
         orders, publishes real Kafka records, or fires real concurrent requests against
         order-service/inventory-service/fulfillment-orchestrator; nothing here is simulated
         client-side.
+        {!canOperate && (
+          <>
+            {" "}
+            Triggering/resetting requires the <code>ops</code> or <code>admin</code> role — your
+            current role is read-only here.
+          </>
+        )}
       </p>
 
       {state.status === "loading" && <LoadingState label="Loading scenario catalog…" />}
@@ -158,6 +169,7 @@ export function FailureLabPage() {
               key={detail.catalog.id}
               detail={detail}
               isBusy={busyScenarios.has(detail.catalog.id)}
+              canOperate={canOperate}
               onTrigger={handleTrigger}
               onReset={handleReset}
             />

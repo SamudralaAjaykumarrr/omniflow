@@ -1,7 +1,8 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { FailureLabPage } from "./FailureLabPage";
+import { renderWithAuth as render } from "../test/renderWithAuth";
 import * as failureLabApi from "../api/failureLab";
 import type { ScenarioDetail } from "../api/types";
 

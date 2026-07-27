@@ -5,6 +5,156 @@ architectural decisions get a full ADR under `docs/adrs/`; this log also
 captures smaller in-flight calls that don't warrant a standalone ADR, plus
 pointers to the ADRs when they do.
 
+## 2026-07-27 — Phase 9: JWT/RBAC finalization
+
+Implementation of ADR 0009's JWT/RBAC design (self-contained JWT + RBAC,
+bcrypt-hashed passwords, no external IdP) — the scope explicitly requested
+for this pass: "the remaining JWT authentication and role-based
+access-control work." Dependency/SAST scanning, another slice of Phase 9's
+original scope, already landed in Phase 5.
+
+- **Audit-log rows for sensitive actions (ADR 0009's `audit_log`: actor,
+  action, target, timestamp) are intentionally not built in this pass.**
+  ADR 0009 names both JWT/RBAC and audit events as part of its design, but
+  the task scoping this work explicitly named "JWT authentication and
+  role-based access-control," and `PROJECT_STATUS.md`'s own prior wording
+  already treated "audit events" as a distinct remaining item from "JWT/RBAC
+  finalization." Named here explicitly rather than silently dropped — a
+  real, still-open gap against ADR 0009's full design, tracked as a new
+  risk (`RISKS.md` #35) rather than either quietly building it unasked or
+  quietly omitting it from the record.
+
+- **Enforcement is scoped to exactly what ADR 0009 documents — api-gateway's
+  own routes and failure-lab's scenario trigger/reset — not every service's
+  own HTTP surface.** ADR 0009's own words: "The API Gateway verifies the
+  JWT on every protected route... e.g. cancelling an order or triggering a
+  failure-lab scenario requires ops or admin." Re-reading the current
+  architecture before writing any code surfaced a real tension: Phase 7's
+  ops-dashboard nginx proxies `/inventory-api/`, `/orchestrator-api/`, and
+  `/failure-lab-api/` directly to inventory-service/fulfillment-orchestrator/
+  failure-lab, bypassing the gateway entirely for three of four backends —
+  so gateway-only enforcement doesn't close every direct-access path. But
+  order-service, inventory-service, and fulfillment-orchestrator's own HTTP
+  routes are also the exact routes the saga orchestrator and failure-lab's
+  scenario runner call directly, with no user JWT to present (the
+  orchestrator's saga consumer isn't acting on behalf of a logged-in
+  person). Protecting those routes too would mean either breaking real
+  saga/failure-lab machinery outright or building a second, broader
+  service-to-service auth layer (mTLS or per-service tokens for every
+  internal caller) — a materially larger scope than "JWT/RBAC
+  finalization" that ADR 0009 never called for and that risks the hard
+  "keep service-to-service behavior intact" requirement if done under time
+  pressure. Chose the bounded, documented scope over silently expanding it:
+  api-gateway (`/api/orders*`, `/api/inventory/stock/*`) and failure-lab
+  (`/scenarios/*`) are now genuinely protected with real 401/403 semantics;
+  order-service/inventory-service/fulfillment-orchestrator's own routes
+  remain trusted-Docker-network-only, the same posture failure-lab's own
+  `/internal/failure-lab/*` endpoints and inventory-service's outage
+  endpoints already established in Phase 8. `RISKS.md` #25 is updated, not
+  closed outright, to name this precisely.
+- **A new `users` table lives in api-gateway, not a shared/new auth
+  service.** api-gateway is the one place ADR 0009 names as the JWT issuer
+  and the one FastAPI service with no database of its own yet. Gave it a
+  new per-service Postgres database (`omniflow_gateway`), Alembic-migrated
+  exactly like order-service/inventory-service/fulfillment-orchestrator/
+  failure-lab already are — same "no live cross-service FKs" boundary
+  (ADR 0008), not a new pattern.
+- **The signing secret, issuer, and audience are shared infra config
+  (`JWT_SECRET_KEY`/`JWT_ISSUER`/`JWT_AUDIENCE`, not
+  `GATEWAY_`-/`FAILURE_LAB_`-prefixed), the same precedent
+  `KAFKA_BOOTSTRAP_SERVERS`/`OTEL_EXPORTER_OTLP_ENDPOINT` already set.**
+  HS256 is a symmetric algorithm — api-gateway (issuer) and failure-lab
+  (verifier) must agree on the exact same secret bit-for-bit, so it can't be
+  a per-service value with independent defaults.
+- **No code-level default for `JWT_SECRET_KEY`.** `Settings.jwt_secret_key`
+  has no fallback — a service that starts with the env var genuinely unset
+  fails immediately with a clear pydantic validation error, not a silent
+  well-known placeholder baked into source. The only place a convenience
+  dev value exists is `docker-compose.yml`'s environment default and
+  `.env.example`, exactly the same pattern this repo already uses for
+  `POSTGRES_PASSWORD`/`MINIO_ROOT_PASSWORD`/`GRAFANA_ADMIN_PASSWORD` — a
+  local-demo-only value, documented as such, never hidden.
+- **Roles are ranked (`viewer < ops < admin`), not enumerated per route.**
+  `event_contracts.auth.build_require_role_dependency(dep, min_role)`
+  checks the caller's role rank against a single minimum, so `admin`
+  automatically inherits every `ops` permission without a second,
+  independently-maintained allow-list per route — least-privilege by
+  construction: every route defaults to the lowest role that can do the
+  job.
+- **JWT verification/RBAC dependencies live in `event_contracts` (shared),
+  reused by api-gateway and failure-lab — the same "shared helper, each
+  service supplies its own settings" pattern `metrics_setup.MetricsMiddleware`/
+  `configure_logging`/`configure_tracing` already established.** Password
+  hashing (bcrypt via passlib, per ADR 0009's explicit wording) and the
+  `users` table stay local to api-gateway, since it's the only service that
+  ever touches credentials.
+- **`bcrypt` pinned to `4.0.1`, below `4.1`, alongside `passlib==1.7.4`.**
+  `passlib`'s bcrypt backend probes `bcrypt.__about__.__version__` at first
+  use; `bcrypt>=4.1` removed that module entirely, breaking passlib's
+  backend detection. Verified directly (ran the real gateway test suite
+  against this exact pin combination) before trusting it, rather than
+  assuming compatibility from the version numbers alone.
+- **failure-lab's `GatewayClient` (the only caller of api-gateway's
+  now-protected `POST /api/orders`, for the customer-facing scenarios that
+  deliberately go through the gateway) logs in as a seeded, scoped
+  `ops`-role service account and caches the token, refreshing a little
+  before actual expiry.** This is real machine-to-machine authentication,
+  not a bypass: the scenario runner has no human user context to present,
+  so api-gateway seeds a separate, least-privilege service account
+  (`failure-lab-service@omniflow.local`, role `ops` — no more than it
+  needs) at startup alongside the human demo accounts (admin/ops/viewer),
+  same idempotent-seed mechanism, same "local-dev-only, documented"
+  credential convention.
+- **Demo users (admin/ops/viewer + the service account) are seeded
+  idempotently at every api-gateway startup, not via a separate
+  registration endpoint or a one-off manual script.** This is a portfolio
+  demo with `make demo` as the one-command entry point — building a login
+  screen with no way to actually get a first account would reproduce
+  Phase 7's own reasoning for *not* building a fake login (`RISKS.md` #25's
+  original text: "building a login screen with nothing real to
+  authenticate against would be exactly the kind of fabricated capability
+  CLAUDE.md forbids"). The seed step only inserts users whose email doesn't
+  already exist, so it's safe to run on every container start, including
+  against a persistent dev volume.
+- **The ops dashboard's `AuthContext.login()` makes a second round trip to
+  `GET /auth/me` after `POST /auth/login`, rather than decoding the JWT
+  payload client-side.** The server is the source of truth for the
+  authenticated identity; a client-side base64 JWT decode is unverified by
+  definition (no signature check happens in the browser) and would be the
+  wrong thing to trust for anything the UI conditions on, even for a
+  display-only role label.
+- **The dashboard's role-gating (hiding Create/Cancel Order and Failure Lab
+  trigger/reset for a `viewer` session) is a UI convenience, not the
+  security boundary — the boundary is api-gateway's/failure-lab's own
+  403.** Named explicitly in `AuthContextValue.hasRole`'s own docstring so
+  it's never mistaken for enforcement; deliberately not extended to the Dead
+  Letter Queue's Replay button or other orchestrator-direct actions, since
+  those routes remain unauthenticated at the backend (per the scope
+  decision above) — gating only the UI there would be security theater,
+  implying a protection that doesn't actually exist server-side.
+- **Session token lives in `sessionStorage`, not `localStorage`.** A
+  simpler, more contained default for a short-lived bearer token with no
+  refresh-token rotation (ADR 0009's own named simplification) — cleared
+  automatically when the tab closes, rather than persisting indefinitely
+  across browser sessions.
+- **Real findings caught by actually running `make ci`, fixed at the root
+  cause rather than suppressed broadly**: (1) `mypy`'s native PEP 681
+  (`dataclass_transform`) support — which pydantic's `BaseModel` stub opts
+  into, with no explicit plugin config needed — treats a `Settings` field
+  with no code-level default (`jwt_secret_key`) as a required constructor
+  keyword, so `Settings()` in `get_settings()` failed type-checking even
+  though `pydantic-settings` genuinely resolves it from the `JWT_SECRET_KEY`
+  env var at runtime. Fixed with a scoped, explained `# type: ignore[call-arg]`
+  on that one call in both api-gateway's and failure-lab's `config.py` — the
+  same class of real stub/type-system gap (not a bug) as the
+  `Mutable.as_mutable` case documented in Phase 3. (2) failure-lab's
+  `GatewayClient._login` returned `self._token` (declared `str | None`)
+  from a function typed `-> str`; assigning `body["access_token"]` (`Any`,
+  from `resp.json()`) to the attribute doesn't narrow its *declared* type
+  for mypy's purposes. Fixed by capturing the token in a locally-typed
+  `str` variable first, assigning that to the attribute, and returning the
+  local — a real type-safety gap in the new code, not a suppression.
+
 ## 2026-07-26 — Phase 8: Failure laboratory
 
 - **A new `failure-lab` service, not new endpoints scattered across

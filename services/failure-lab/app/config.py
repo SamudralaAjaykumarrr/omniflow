@@ -42,7 +42,31 @@ class Settings(BaseSettings):
     # never permanently wedge the shared dev stack.
     downstream_outage_max_duration_seconds: int = 30
 
+    # Phase 9 (JWT/RBAC, ADR 0009): failure-lab verifies JWTs issued by
+    # api-gateway, so the signing secret/issuer/audience must be the exact
+    # same shared infra config api-gateway itself uses — not
+    # FAILURE_LAB_-prefixed, same reasoning as kafka_bootstrap_servers
+    # above. No code-level default for the secret (see api-gateway's
+    # config.py for the full "fail loud, not a silent placeholder" reasoning).
+    jwt_secret_key: str = Field(validation_alias="JWT_SECRET_KEY")
+    jwt_issuer: str = Field(default="omniflow-api-gateway", validation_alias="JWT_ISSUER")
+    jwt_audience: str = Field(default="omniflow-services", validation_alias="JWT_AUDIENCE")
+
+    # The scoped `ops`-role service account (seeded by api-gateway's own
+    # app.seed) this service's GatewayClient logs in as for its
+    # machine-to-machine calls against the gateway's now-protected
+    # POST /api/orders (payment-decline/timeout, duplicate-order-submit
+    # scenarios go through the gateway deliberately — see docstring above).
+    # Dev-only credentials, documented in .env.example, same convention as
+    # every other seeded demo account.
+    gateway_service_email: str = "failure-lab-service@omniflow.local"
+    gateway_service_password: str = "service_dev_only"
+
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    # See api-gateway/app/config.py's get_settings() for why this needs a
+    # scoped ignore: jwt_secret_key has no code-level default (resolved from
+    # the JWT_SECRET_KEY env var at runtime), which mypy's native
+    # dataclass_transform support treats as a required constructor keyword.
+    return Settings()  # type: ignore[call-arg]

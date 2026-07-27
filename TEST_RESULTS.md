@@ -1,6 +1,6 @@
 # Test Results
 
-Last updated: 2026-07-26 (Phase 8, Failure laboratory, complete).
+Last updated: 2026-07-27 (Phase 9, JWT/RBAC finalization, complete).
 
 This file is updated after every phase with real output from real commands;
 no number here is ever estimated or invented (see `RISKS.md` #4).
@@ -994,3 +994,154 @@ invocations (one left over from a prior manual rebuild, one started by
 `make smoke`) raced and hit a container-naming conflict — resolved with a
 clean `docker compose down` (no `-v`, volumes preserved) followed by
 `docker compose up -d`; not a code regression.
+
+### 2026-07-27 — Phase 9: JWT/RBAC finalization
+
+Full detail and scope-boundary reasoning: `DECISIONS.md` "Phase 9". Every
+number below comes from a real `make ci` run (and a separate, real
+`docker compose up` verification against the live stack) in this session.
+
+**Unit/API tests** (`make coverage`, which runs `make test` first — each
+suite via `docker compose run --rm <service> pytest --cov=app
+--cov-report=term-missing` against its own `*_test` Postgres database):
+
+| Suite | Passed | Failed | Coverage |
+|---|---|---|---|
+| event-contracts | 59 | 0 | 89% |
+| order-service | 37 | 0 | 91% |
+| inventory-service | 23 | 0 | 94% |
+| fulfillment-orchestrator | 41 | 0 | 79% |
+| api-gateway | 30 | 0 | 92% |
+| data-platform | 145 | 0 | 64% |
+| failure-lab | 76 | 0 | 94% |
+| **Total** | **411** | **0** | |
+
+Up from 359 in Phase 8: +21 event-contracts (`event_contracts/auth.py` —
+token creation/decode round-trip, every negative-token case: expired,
+malformed, wrong-signature, wrong-audience, wrong-issuer, unknown-role,
+missing-claim; plus the FastAPI dependency wiring's 401/403 boundary
+against a throwaway app), +21 api-gateway (password hashing round-trip,
+login success/failure/inactive-user, `/auth/me`, and the same
+negative-token suite exercised against real protected gateway routes with
+a real Postgres-backed `users` table — not just the shared dependency unit
+tests), +10 failure-lab (the same authentication/authorization boundary
+against `/scenarios/*`, plus `GatewayClient`'s service-account login/token
+caching/refresh behavior).
+
+`make coverage` (combined `coverage.xml`, all seven suites):
+`TOTAL 5222 999 80.9%` — up from 80.3% in Phase 8, still well above the
+enforced 65% threshold (`coverage report --fail-under=65`, exit 0).
+`event_contracts/auth.py` and `api-gateway/app/security.py` are both 100%
+covered; `api-gateway/app/seed.py` (the demo-user-seeding startup path,
+exercised for real in the live-stack verification below, not by these
+no-startup-event unit tests) is the one new module with a real coverage
+gap (56%), the same "exercised live, not by unit tests" pattern this
+suite already accepts for `generator.py`/`gold/runner.py`/`lag_poller.py`.
+
+**Dashboard tests** (`make dashboard-test`, Vitest + React Testing
+Library): **82 passed, 0 failed**, 19 test files (up from 66/16) —
++16 new: `auth/AuthContext.test.tsx` (6: login hydrates via `GET /auth/me`,
+logout clears session/token/sessionStorage, session restore on mount, role
+ranking, login-rejection leaves the session unauthenticated),
+`auth/RequireAuth.test.tsx` (2: redirect-to-login when unauthenticated,
+render-through when a session is already stored), `pages/LoginPage.test.tsx`
+(3: successful login navigates to the redirect target, wrong credentials
+show an error and stay on the page, submit button disables mid-request),
+plus 5 new cases in `api/client.test.ts` (Authorization header attached
+once a token is set / absent otherwise, `getAuthToken` reflects the
+current token, the registered unauthorized handler fires on a real 401 and
+not on a 403). `dashboard-format-check`/`dashboard-lint`/
+`dashboard-typecheck`/`dashboard-build` all clean, zero warnings (two
+real ESLint warnings — a `useMemo` missing-dependency and a
+fast-refresh-incompatible context/hook co-export — were fixed at the root
+cause: `hasRole`/`login`/`logout` wrapped in `useCallback`, and the context
+object split into its own `auth/context.ts` file, not suppressed).
+
+**Formatting** (`make format-check`): 235 files, all formatted (after one
+`ruff format` pass fixed 6 files this phase touched that hadn't been
+reformatted yet).
+
+**Lint** (`make lint`): all checks passed.
+
+**Type checking** (`make typecheck`): all seven packages pass clean —
+`api-gateway/app` now 11 source files (up from 7), `failure-lab/app` now
+29 (up from 25 — `app/security.py`). **Two real findings fixed, not
+suppressed with a redundant/unscoped ignore**: (1) mypy's native PEP 681
+(`dataclass_transform`) support (built into mypy, not this project's own
+config) treats a pydantic-settings field with no code-level default
+(`jwt_secret_key`) as a required constructor keyword — `Settings()` failed
+type-checking in both api-gateway's and failure-lab's `get_settings()`
+even though the value is genuinely resolved from the `JWT_SECRET_KEY` env
+var at runtime; fixed with a scoped, explained
+`# type: ignore[call-arg]`, the same class of suppression as the
+`Mutable.as_mutable` stub gap documented in Phase 3. (2) failure-lab's
+`GatewayClient._login` returned `self._token` (declared `str | None`) from
+a function typed `-> str` — assigning an `Any`-typed value
+(`resp.json()`) to the attribute doesn't narrow its declared type for
+mypy's purposes; fixed by capturing the token in a locally-typed `str`
+variable first, a real type-safety improvement, not a suppression.
+
+**Pre-commit** (`make pre-commit`, `--all-files`): `trailing-whitespace`,
+`end-of-file-fixer`, `check-merge-conflict`, `check-added-large-files`,
+`check-yaml`, `check-json`, `check-toml`, `detect-private-key`,
+`mixed-line-ending`, `ruff`, `ruff-format` — all Passed.
+
+**Security** (`make security`): `bandit -ll` — 0 medium, 0 high across
+10,177 scanned lines (32 low-severity informational — no new medium/high
+introduced by `event_contracts.auth`, api-gateway's `users`
+table/security/seed modules, or failure-lab's `security.py`). `pip-audit
+--strict` (adds `pyjwt==2.9.0` to event-contracts' dependencies,
+`sqlalchemy`/`psycopg[binary]`/`alembic`/`passlib[bcrypt]`/`bcrypt==4.0.1`
+to api-gateway's `requirements.txt`): `No known vulnerabilities found` on
+all seven scan targets — no new CVE introduced by any Phase 9 dependency;
+accepted-ID counts unchanged from `RISKS.md` #20 (8 ignored per HTTP
+service, 2 for data-platform, 9 for event-contracts' own local scan).
+
+**Docker Compose validation** (`make docker-validate`): `docker compose
+config --quiet` — valid, including api-gateway's new `GATEWAY_DATABASE_URL`/
+`JWT_SECRET_KEY`/`JWT_ISSUER`/`JWT_AUDIENCE`/`GATEWAY_SEED_*` environment
+and failure-lab's new `JWT_SECRET_KEY`/`FAILURE_LAB_GATEWAY_SERVICE_*`.
+
+**Docker image builds** (`make docker-build`): `order-service`,
+`inventory-service`, `fulfillment-orchestrator`, `api-gateway` (rebuilt
+with SQLAlchemy/Alembic/passlib/bcrypt/pyjwt and its own Alembic
+`entrypoint.sh`, matching every other stateful service), `spark-gold`
+(data-platform), `ops-dashboard`, `failure-lab` — all built successfully.
+
+**`make ci`**: exit 0. All of the above, in one real run, in that order.
+
+**Real end-to-end verification against the live `docker compose up`
+stack** (not just unit tests — the exact same "prove it against the real
+stack" standard every prior phase held itself to):
+- Ran `alembic upgrade head` for api-gateway's new `omniflow_gateway`
+  database for real (`docker compose run --rm api-gateway alembic upgrade
+  head`) — migration `0001` (the `users` table) applied cleanly.
+- Started the real `api-gateway` container and confirmed its startup
+  seed step ran: logged in as all three demo accounts
+  (`admin@omniflow.local`/`ops@omniflow.local`/`viewer@omniflow.local`)
+  via a real `POST /auth/login` — each returned `200` with a real signed
+  JWT carrying that user's actual role.
+- Confirmed the 401/403 boundary against the real, running gateway, not
+  just a unit test: `POST /api/orders` with no token → `401`; with a
+  `viewer` token → `403`; with an `ops` token → `422` (the request reached
+  the real order-service proxy and failed on the request body, not on
+  auth) — proving `viewer` is correctly blocked from mutation while `ops`
+  is correctly let through to the real downstream service.
+- Confirmed `/healthz` and `/metrics` stayed `200` with no token, on the
+  real running gateway.
+- Rebuilt and started the real `failure-lab` container and confirmed the
+  same boundary there: `POST /scenarios/payment-decline/trigger` with no
+  token → `401`; with a `viewer` token → `403`; with an `ops` token → `202`
+  — and confirmed in the real container logs that failure-lab's own
+  `GatewayClient` successfully logged in as the seeded service account
+  (`POST http://api-gateway:8000/auth/login` → `200`) and then successfully
+  created a real order through the now-protected gateway
+  (`POST http://api-gateway:8000/api/orders` → `201`) — the
+  machine-to-machine auth path working end to end, not just asserted in a
+  mocked test.
+- Rebuilt and started the real `ops-dashboard` container and confirmed the
+  full path through its own nginx proxy (not directly against a backend
+  container): `GET /` → `200` (SPA serves); `POST /gw/auth/login` → `200`;
+  `GET /failure-lab-api/scenarios` with no token → `401`; with a valid
+  token → `200` — the dashboard's actual runtime proxy path, end to end,
+  not just the underlying API in isolation.

@@ -1,7 +1,8 @@
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { DeadLetterQueuePage } from "./DeadLetterQueuePage";
+import { renderWithAuth as render } from "../test/renderWithAuth";
 import * as orchestratorApi from "../api/orchestrator";
 import type { DeadLetterEvent } from "../api/types";
 

@@ -225,9 +225,22 @@ services:
       GATEWAY_ORDER_SERVICE_URL: http://order-service:8000
       GATEWAY_INVENTORY_SERVICE_URL: http://inventory-service:8000
       GATEWAY_RATE_LIMIT_PER_MINUTE: ${GATEWAY_RATE_LIMIT_PER_MINUTE:-120}
+      GATEWAY_DATABASE_URL: ${GATEWAY_DATABASE_URL:-postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/omniflow_gateway}
+      # Phase 9 (JWT/RBAC, ADR 0009): local-development-only default, never
+      # a real secret — see .env.example and DECISIONS.md "Phase 9" for why
+      # application code itself has no fallback (fails startup if unset
+      # entirely; this compose-level default is the only place a dev value
+      # lives, same pattern as every other secret in this file).
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-omniflow_dev_only_jwt_secret_change_before_any_shared_use}
+      GATEWAY_SEED_ADMIN_PASSWORD: ${GATEWAY_SEED_ADMIN_PASSWORD:-admin_dev_only}
+      GATEWAY_SEED_OPS_PASSWORD: ${GATEWAY_SEED_OPS_PASSWORD:-ops_dev_only}
+      GATEWAY_SEED_VIEWER_PASSWORD: ${GATEWAY_SEED_VIEWER_PASSWORD:-viewer_dev_only}
+      GATEWAY_SEED_SERVICE_PASSWORD: ${GATEWAY_SEED_SERVICE_PASSWORD:-service_dev_only}
     ports:
       - "8080:8000"
     depends_on:
+      postgres:
+        condition: service_healthy
       order-service:
         condition: service_healthy
       inventory-service:
@@ -278,6 +291,11 @@ services:
       FAILURE_LAB_ORDER_SERVICE_URL: http://order-service:8000
       FAILURE_LAB_INVENTORY_SERVICE_URL: http://inventory-service:8000
       FAILURE_LAB_ORCHESTRATOR_SERVICE_URL: http://fulfillment-orchestrator:8000
+      # Phase 9 (JWT/RBAC, ADR 0009): must be the exact same shared secret
+      # api-gateway signs with — failure-lab only verifies, never issues.
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-omniflow_dev_only_jwt_secret_change_before_any_shared_use}
+      FAILURE_LAB_GATEWAY_SERVICE_EMAIL: ${GATEWAY_SEED_SERVICE_EMAIL:-failure-lab-service@omniflow.local}
+      FAILURE_LAB_GATEWAY_SERVICE_PASSWORD: ${GATEWAY_SEED_SERVICE_PASSWORD:-service_dev_only}
     ports:
       - "8004:8000"
     depends_on:

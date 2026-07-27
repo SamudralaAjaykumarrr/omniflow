@@ -45,6 +45,27 @@ interface RequestOptions {
 
 const DEFAULT_TIMEOUT_MS = 8000;
 
+// Phase 9 (JWT/RBAC): the current session's bearer token, set/cleared by
+// AuthContext — a plain module-level variable (not React state) since
+// every API call in this file is a plain function, not a component. A 401
+// from any backend call clears it and notifies AuthContext via
+// `onUnauthorized`, so an expired/invalidated token doesn't keep getting
+// silently resent.
+let authToken: string | null = null;
+let onUnauthorized: (() => void) | null = null;
+
+export function setAuthToken(token: string | null): void {
+  authToken = token;
+}
+
+export function getAuthToken(): string | null {
+  return authToken;
+}
+
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  onUnauthorized = handler;
+}
+
 async function request<T>(base: string, path: string, options: RequestOptions = {}): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
@@ -55,11 +76,15 @@ async function request<T>(base: string, path: string, options: RequestOptions = 
     else externalSignal.addEventListener("abort", () => controller.abort(), { once: true });
   }
 
+  const headers: Record<string, string> = {};
+  if (options.body) headers["Content-Type"] = "application/json";
+  if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
+
   let response: Response;
   try {
     response = await fetch(`${base}${path}`, {
       method: options.method ?? "GET",
-      headers: options.body ? { "Content-Type": "application/json" } : undefined,
+      headers: Object.keys(headers).length > 0 ? headers : undefined,
       body: options.body ? JSON.stringify(options.body) : undefined,
       signal: controller.signal,
     });
@@ -75,6 +100,9 @@ async function request<T>(base: string, path: string, options: RequestOptions = 
       body = (await response.json()) as ApiErrorBody;
     } catch {
       body = undefined;
+    }
+    if (response.status === 401) {
+      onUnauthorized?.();
     }
     const message =
       body?.message ?? body?.detail ?? `Request failed with status ${response.status}`;

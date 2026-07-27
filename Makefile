@@ -45,6 +45,11 @@ ORDER_TEST_DB := postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/o
 INVENTORY_TEST_DB := postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/omniflow_inventory_test
 ORCHESTRATOR_TEST_DB := postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/omniflow_orchestrator_test
 FAILURE_LAB_TEST_DB := postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/omniflow_failure_lab_test
+GATEWAY_TEST_DB := postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/omniflow_gateway_test
+# Test-only JWT secret — never used outside this suite's own throwaway
+# containers (see .env.example / DECISIONS.md "Phase 9" for the real
+# local-dev-vs-production distinction this is not trying to make).
+GATEWAY_TEST_JWT_SECRET := test-only-jwt-secret-never-used-outside-pytest
 
 ## Bring up the full local stack (build + start), matching the single-command demo requirement.
 demo: up
@@ -83,6 +88,7 @@ migrate:
 	$(COMPOSE) run --rm order-service alembic upgrade head
 	$(COMPOSE) run --rm inventory-service alembic upgrade head
 	$(COMPOSE) run --rm fulfillment-orchestrator alembic upgrade head
+	$(COMPOSE) run --rm api-gateway alembic upgrade head
 
 ## Run every service's test suite against its dedicated *_test database.
 test: test-contracts test-order test-inventory test-orchestrator test-gateway test-data-platform test-failure-lab
@@ -123,10 +129,15 @@ test-orchestrator:
 		-e COVERAGE_FILE=/coverage-data/.coverage.fulfillment-orchestrator -v $(COVERAGE_DIR):/coverage-data \
 		fulfillment-orchestrator pytest --cov=app --cov-report=term-missing
 
+## Phase 9 (JWT/RBAC): api-gateway now owns a `users` table/database, same
+## migrate-then-test pattern as order-service/inventory-service.
 test-gateway:
 	@mkdir -p $(COVERAGE_DIR)
+	$(COMPOSE) up -d postgres
 	$(COMPOSE) build api-gateway
-	$(COMPOSE) run --rm -e COVERAGE_FILE=/coverage-data/.coverage.api-gateway -v $(COVERAGE_DIR):/coverage-data \
+	$(COMPOSE) run --rm -e GATEWAY_DATABASE_URL=$(GATEWAY_TEST_DB) \
+		-e JWT_SECRET_KEY=$(GATEWAY_TEST_JWT_SECRET) -e GATEWAY_SEED_DEMO_USERS=false \
+		-e COVERAGE_FILE=/coverage-data/.coverage.api-gateway -v $(COVERAGE_DIR):/coverage-data \
 		api-gateway pytest --cov=app --cov-report=term-missing
 
 ## Phase 8 (Failure laboratory) service: scenario catalog, trigger/reset API,
@@ -136,6 +147,7 @@ test-failure-lab:
 	$(COMPOSE) up -d postgres
 	$(COMPOSE) build failure-lab
 	$(COMPOSE) run --rm -e FAILURE_LAB_DATABASE_URL=$(FAILURE_LAB_TEST_DB) \
+		-e JWT_SECRET_KEY=$(GATEWAY_TEST_JWT_SECRET) \
 		-e COVERAGE_FILE=/coverage-data/.coverage.failure-lab -v $(COVERAGE_DIR):/coverage-data \
 		failure-lab pytest --cov=app --cov-report=term-missing
 
@@ -370,7 +382,8 @@ typecheck:
 			fastapi==0.115.0 httpx==0.27.2 confluent-kafka==2.5.3 \
 			opentelemetry-api==1.27.0 prometheus-client==0.21.0 \
 			pyspark==3.5.3 pyarrow==17.0.0 s3fs==2024.9.0 \
-			pandas==2.2.3 numpy==2.1.2 scikit-learn==1.5.2 joblib==1.4.2 && \
+			pandas==2.2.3 numpy==2.1.2 scikit-learn==1.5.2 joblib==1.4.2 \
+			pyjwt==2.9.0 passlib==1.7.4 bcrypt==4.0.1 && \
 		(cd services/event-contracts && mypy --config-file=/repo/pyproject.toml event_contracts) && \
 		(cd services/order-service && mypy --config-file=/repo/pyproject.toml app) && \
 		(cd services/inventory-service && mypy --config-file=/repo/pyproject.toml app) && \

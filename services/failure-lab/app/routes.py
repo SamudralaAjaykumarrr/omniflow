@@ -15,6 +15,7 @@ from app.schemas import (
     ScenarioResetResponse,
     ScenarioRunResponse,
 )
+from app.security import require_ops, require_viewer
 
 router = APIRouter()
 
@@ -57,12 +58,20 @@ def readyz(db: Session = Depends(get_db)) -> dict[str, str]:
     return {"status": "ready"}
 
 
-@router.get("/scenarios", response_model=list[ScenarioDetailResponse])
+@router.get(
+    "/scenarios",
+    response_model=list[ScenarioDetailResponse],
+    dependencies=[Depends(require_viewer)],
+)
 def list_scenarios(db: Session = Depends(get_db)):
     return [_detail(db, scenario_id) for scenario_id in SCENARIO_ORDER]
 
 
-@router.get("/scenarios/{scenario_id}", response_model=ScenarioDetailResponse)
+@router.get(
+    "/scenarios/{scenario_id}",
+    response_model=ScenarioDetailResponse,
+    dependencies=[Depends(require_viewer)],
+)
 def get_scenario(scenario_id: str, db: Session = Depends(get_db)):
     if scenario_id not in REGISTRY:
         raise HTTPException(status_code=404, detail=f"no such scenario: {scenario_id!r}")
@@ -70,7 +79,10 @@ def get_scenario(scenario_id: str, db: Session = Depends(get_db)):
 
 
 @router.post(
-    "/scenarios/{scenario_id}/trigger", response_model=ScenarioRunResponse, status_code=202
+    "/scenarios/{scenario_id}/trigger",
+    response_model=ScenarioRunResponse,
+    status_code=202,
+    dependencies=[Depends(require_ops)],
 )
 def trigger_scenario(scenario_id: str, db: Session = Depends(get_db)):
     try:
@@ -80,7 +92,11 @@ def trigger_scenario(scenario_id: str, db: Session = Depends(get_db)):
     return ScenarioRunResponse.model_validate(run)
 
 
-@router.get("/scenarios/{scenario_id}/runs", response_model=list[ScenarioRunResponse])
+@router.get(
+    "/scenarios/{scenario_id}/runs",
+    response_model=list[ScenarioRunResponse],
+    dependencies=[Depends(require_viewer)],
+)
 def list_scenario_runs(scenario_id: str, limit: int = 20, db: Session = Depends(get_db)):
     if scenario_id not in REGISTRY:
         raise HTTPException(status_code=404, detail=f"no such scenario: {scenario_id!r}")
@@ -89,7 +105,11 @@ def list_scenario_runs(scenario_id: str, limit: int = 20, db: Session = Depends(
     ]
 
 
-@router.get("/scenarios/{scenario_id}/runs/{run_id}", response_model=ScenarioRunResponse)
+@router.get(
+    "/scenarios/{scenario_id}/runs/{run_id}",
+    response_model=ScenarioRunResponse,
+    dependencies=[Depends(require_viewer)],
+)
 def get_scenario_run(scenario_id: str, run_id: uuid.UUID, db: Session = Depends(get_db)):
     run = db.get(ScenarioRun, run_id)
     if run is None or run.scenario_id != scenario_id:
@@ -97,7 +117,11 @@ def get_scenario_run(scenario_id: str, run_id: uuid.UUID, db: Session = Depends(
     return ScenarioRunResponse.model_validate(run)
 
 
-@router.post("/scenarios/{scenario_id}/reset", response_model=ScenarioResetResponse)
+@router.post(
+    "/scenarios/{scenario_id}/reset",
+    response_model=ScenarioResetResponse,
+    dependencies=[Depends(require_ops)],
+)
 def reset_scenario(scenario_id: str, db: Session = Depends(get_db)):
     try:
         row = runner.reset(db, scenario_id)
