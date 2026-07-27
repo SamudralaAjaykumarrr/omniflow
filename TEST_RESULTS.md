@@ -1,6 +1,6 @@
 # Test Results
 
-Last updated: 2026-07-26 (Phase 7, Ops dashboard, complete).
+Last updated: 2026-07-26 (Phase 8, Failure laboratory, complete).
 
 This file is updated after every phase with real output from real commands;
 no number here is ever estimated or invented (see `RISKS.md` #4).
@@ -883,3 +883,114 @@ were not touched); a `docker compose down` + `up -d minio` recreated the
 network cleanly and the identical `make test-data-platform` command then
 passed outright, confirming the failure was host/Docker-Desktop
 infrastructure flakiness, not a regression.
+
+### 2026-07-26 — Phase 8: Failure laboratory
+
+Commands run via `make test-<suite>` (each a throwaway container against
+its own `*_test` Postgres database, or a mocked fixture set for
+event-contracts/failure-lab):
+
+| Suite | Passed | Failed | Coverage |
+|---|---|---|---|
+| event-contracts | 38 | 0 | 88% |
+| order-service | 37 | 0 | 91% |
+| inventory-service | 23 | 0 | 94% |
+| fulfillment-orchestrator | 41 | 0 | 79% |
+| api-gateway | 9 | 0 | 93% |
+| data-platform | 145 | 0 | 64% |
+| **failure-lab** (new) | **66** | **0** | **94%** |
+| **Total** | **359** | **0** | |
+
+`make coverage` (combined `coverage.xml`, all seven suites):
+`TOTAL 5007 987 80.3%` — well above the enforced 65% threshold
+(`coverage report --fail-under=65`, exit 0).
+
+`make dashboard-test` (Vitest + React Testing Library): **66 passed, 0
+failed**, 16 test files (was 50/14 in Phase 7; +12 for the new
+`FailureLabPage`/`failureLab.ts` and +4 for a new working "Replay" button
+on the Dead Letter Queue screen — see below). `dashboard-format-check`/
+`dashboard-lint`/`dashboard-typecheck`/`dashboard-build` all clean.
+
+`make phase8-smoke` (`scripts/phase8_smoke_test.sh`, real running stack,
+run twice — see the log excerpt below for the final passing run): all 10
+scenarios reach `PASSED`/`RECOVERED` on a clean start, every scenario's
+`reset()` succeeds, then all 10 reach `PASSED`/`RECOVERED` again on rerun
+(proves safe-to-rerun for the whole catalog against a live stack, not just
+asserted in a unit test):
+
+```
+[phase8-smoke] --- pass 1: every scenario from a clean start ---
+[phase8-smoke] payment-decline: PASSED
+[phase8-smoke] payment-timeout: RECOVERED
+[phase8-smoke] inventory-oversell-race: PASSED
+[phase8-smoke] duplicate-order-submit: PASSED
+[phase8-smoke] duplicate-event-delivery: PASSED
+[phase8-smoke] poison-message-dlq: PASSED
+[phase8-smoke] malformed-kafka-record: PASSED
+[phase8-smoke] late-event-arrival: PASSED
+[phase8-smoke] saga-crash-resume: RECOVERED
+[phase8-smoke] downstream-outage: RECOVERED
+[phase8-smoke] --- reset every scenario ---
+[phase8-smoke] (all 10: reset)
+[phase8-smoke] --- pass 2: rerun every scenario after reset (proves safe-to-rerun) ---
+[phase8-smoke] payment-decline: PASSED
+[phase8-smoke] payment-timeout: RECOVERED
+[phase8-smoke] inventory-oversell-race: PASSED
+[phase8-smoke] duplicate-order-submit: PASSED
+[phase8-smoke] duplicate-event-delivery: PASSED
+[phase8-smoke] poison-message-dlq: PASSED
+[phase8-smoke] malformed-kafka-record: PASSED
+[phase8-smoke] late-event-arrival: PASSED
+[phase8-smoke] saga-crash-resume: RECOVERED
+[phase8-smoke] downstream-outage: RECOVERED
+[phase8-smoke] all 10 scenarios PASSED/RECOVERED on both passes.
+```
+
+`make smoke` (the pre-existing Phase 1-3 end-to-end check) reconfirmed
+passing against the same rebuilt stack: full order lifecycle to `SHIPPED`,
+saga `COMPLETED`, 0 unreplayed dead letters, traces in Jaeger, Prometheus/
+Grafana verified.
+
+`make ci` (format-check, lint, typecheck, coverage, security,
+dashboard-validate, docker-validate, docker-build): **exit 0**, all seven
+Python packages' `mypy` clean, `ruff check`/`ruff format --check` clean,
+`bandit` 0 medium/high, `pip-audit` clean (accepted CVEs unchanged from
+`RISKS.md` #20), `docker compose config` valid, all seven application
+images build (including the new `failure-lab`). `make pre-commit` clean.
+
+**Four real bugs found and fixed while getting the above green** — not
+worked around, fixed at the root cause, each with its own regression test
+(full writeups in `RISKS.md` #28-#31 and `docs/phase-8-failure-laboratory.md`
+"Real bugs found and fixed"):
+
+1. A malformed Kafka record (found: genuine leftover data from Phase 6's
+   `--malformed-rate` generator testing, still sitting in a real
+   `order.created`/`order.validated` topic in this session's persistent
+   Redpanda volume) crashed `order-validator-consumer` /
+   `fulfillment-orchestrator-consumer` on every restart, forever —
+   `event_contracts.kafka.run_consume_loop`'s `parse_envelope(msg)` call
+   was outside its own retry/DLQ try/except. Fixed: logged, counted, and
+   skipped, never retried, never crashing.
+2. `resume_incomplete_sagas` let one orphaned saga (60 such stale rows
+   were found, left over from earlier synthetic-generator testing) crash
+   the entire orchestrator-consumer at every startup. Fixed: each saga
+   resumed independently inside its own try/except.
+3. A transient failure on a brand-new saga's very first `advance_saga`
+   call left it stuck `RUNNING` forever, invisible to both Kafka's retry
+   mechanism and the dead-letter path, because the event was marked
+   "processed" before `advance_saga` ever ran. Fixed: marked processed
+   only after `advance_saga` returns without raising.
+4. `app.replay.replay_one` had never actually worked against a real dead
+   letter (`payload["original_event"]` vs. the real flat-envelope shape)
+   — masked by every existing test building its own wrongly-shaped
+   fixture instead of reusing the real `dead_letter()` code path. Fixed,
+   and verified for real (not just by a test): `make replay ARGS="--all"`
+   successfully replayed 2 real dead letters left over from this
+   session's own earlier (pre-fix) test runs.
+
+One transient, environment-level issue was hit and is recorded here rather
+than silently retried away: two concurrent `docker compose up --build -d`
+invocations (one left over from a prior manual rebuild, one started by
+`make smoke`) raced and hit a container-naming conflict — resolved with a
+clean `docker compose down` (no `-v`, volumes preserved) followed by
+`docker compose up -d`; not a code regression.

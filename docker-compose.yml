@@ -255,6 +255,8 @@ services:
         condition: service_healthy
       prometheus:
         condition: service_healthy
+      failure-lab:
+        condition: service_healthy
     healthcheck:
       # 127.0.0.1, not localhost: nginx only binds IPv4, but this image's
       # wget resolves "localhost" to ::1 first — see Dockerfile's own
@@ -265,6 +267,56 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  failure-lab:
+    build:
+      context: .
+      dockerfile: services/failure-lab/Dockerfile
+    environment:
+      FAILURE_LAB_DATABASE_URL: ${FAILURE_LAB_DATABASE_URL:-postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/omniflow_failure_lab}
+      FAILURE_LAB_API_GATEWAY_URL: http://api-gateway:8000
+      FAILURE_LAB_ORDER_SERVICE_URL: http://order-service:8000
+      FAILURE_LAB_INVENTORY_SERVICE_URL: http://inventory-service:8000
+      FAILURE_LAB_ORCHESTRATOR_SERVICE_URL: http://fulfillment-orchestrator:8000
+    ports:
+      - "8004:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda-topics:
+        condition: service_completed_successfully
+      api-gateway:
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+      fulfillment-orchestrator:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  failure-lab-poison-consumer:
+    build:
+      context: .
+      dockerfile: services/failure-lab/Dockerfile
+    command: ["python", "-m", "app.poison_consumer"]
+    environment:
+      FAILURE_LAB_DATABASE_URL: ${FAILURE_LAB_DATABASE_URL:-postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/omniflow_failure_lab}
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      METRICS_PORT: "9109"
+    expose:
+      - "9109"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda-topics:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
 
   jaeger:
     image: jaegertracing/all-in-one:1.60

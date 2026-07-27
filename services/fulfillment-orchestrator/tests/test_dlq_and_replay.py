@@ -124,7 +124,14 @@ def test_replay_republishes_the_original_event_and_marks_replayed(db_session):
         error_type="KeyError",
         error_message="boom",
         attempt_count=5,
-        payload={"original_event": original.model_dump(mode="json")},
+        # The flat envelope itself — matches what app.consumer.dead_letter()
+        # actually stores (`payload=envelope.model_dump(...)`), not wrapped
+        # in an "original_event" key. An earlier version of this fixture
+        # used the wrong (wrapped) shape, which made this test a false
+        # positive: it never caught replay_one's real KeyError bug (fixed
+        # alongside this test, found running Phase 8's downstream-outage
+        # scenario against a live stack, not by any existing test).
+        payload=original.model_dump(mode="json"),
         first_failed_at=now,
         last_failed_at=now,
     )

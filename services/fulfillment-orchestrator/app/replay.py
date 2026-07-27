@@ -30,8 +30,16 @@ logger = logging.getLogger("fulfillment_orchestrator.replay")
 
 
 def replay_one(producer, db, dead_letter: DeadLetterEvent) -> None:
-    original = dead_letter.payload["original_event"]
-    envelope = EventEnvelope.model_validate(original)
+    # `dead_letter.payload` IS the original envelope's own dict — set
+    # directly as `payload=envelope.model_dump(...)` by app.consumer.
+    # dead_letter(), with no "original_event" wrapper key (that wrapping
+    # only exists in the *separate* deadletter.event Kafka message's own
+    # `data` field, not this DB column). A real, previously-undiscovered
+    # bug found running Phase 8's downstream-outage scenario against a
+    # live stack: every real dead letter this consumer ever created made
+    # this raise KeyError, so `make replay`/this HTTP route had never
+    # successfully replayed a single one before now.
+    envelope = EventEnvelope.model_validate(dead_letter.payload)
     publish_envelope(
         producer,
         topic=envelope.event_type,

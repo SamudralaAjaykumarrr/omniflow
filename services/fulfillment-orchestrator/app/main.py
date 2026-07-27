@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
 from app.config import get_settings
 from app.db import get_engine
@@ -22,15 +23,19 @@ _settings = get_settings()
 configure_logging(_settings.service_name)
 configure_tracing(_settings.service_name, _settings.otel_exporter_otlp_endpoint)
 register_db_pool_collector(get_engine())
-# Note: this process (the read-only API) never calls httpx itself — the
-# saga's REST calls to order/inventory services happen in app/consumer.py,
-# a separate process, which is where HTTPXClientInstrumentor is applied.
+# Phase 8 added two routes that call order-service/inventory-service
+# directly from this process (the saga-crash-resume `resume` route calls
+# advance_saga, which makes the same REST calls app/consumer.py's saga
+# consumer makes) — this process is no longer purely read-only, so it now
+# instruments httpx too, same as every other FastAPI service.
+HTTPXClientInstrumentor().instrument()
 
 app = FastAPI(
     title="OmniFlow Fulfillment Orchestrator",
     description=(
-        "Read-only surface over saga state and dead letters (the consumer "
-        "and outbox relay run as separate processes — see docker-compose.yml)."
+        "Saga state and dead-letter read API, plus two Phase 8 failure-lab admin actions "
+        "(dead-letter replay, on-demand saga resume) — the consumer and outbox relay still "
+        "run as separate processes (see docker-compose.yml)."
     ),
     version="0.1.0",
 )

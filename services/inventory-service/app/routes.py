@@ -12,10 +12,13 @@ from app.exceptions import (
     UnknownStockError,
 )
 from app.models import FulfillmentNode
+from app.outage import get_outage_state
 from app.reservation import expire_stale_reservations, release_reservation, reserve_stock
 from app.schemas import (
     CreateNodeRequest,
+    EnableOutageRequest,
     NodeResponse,
+    OutageStatus,
     ReleaseRequest,
     ReservationResponse,
     ReserveRequest,
@@ -108,3 +111,25 @@ def release_reservation_route(
 def expire_reservations_route(db: Session = Depends(get_db)):
     expired = expire_stale_reservations(db)
     return [ReservationResponse.model_validate(r) for r in expired]
+
+
+@router.post("/internal/failure-lab/outage/enable", response_model=OutageStatus)
+def enable_outage_route(request: EnableOutageRequest):
+    """Phase 8 downstream-outage scenario: see app.outage / app.middleware.
+    SimulatedOutageMiddleware for what "enabled" does to every other route."""
+    state = get_outage_state()
+    state.enable(request.duration_seconds)
+    return OutageStatus(active=state.active, until=state.until)
+
+
+@router.post("/internal/failure-lab/outage/disable", response_model=OutageStatus)
+def disable_outage_route():
+    state = get_outage_state()
+    state.disable()
+    return OutageStatus(active=state.active, until=state.until)
+
+
+@router.get("/internal/failure-lab/outage/status", response_model=OutageStatus)
+def outage_status_route():
+    state = get_outage_state()
+    return OutageStatus(active=state.active, until=state.until)

@@ -56,6 +56,18 @@ STATUS_FAILED = "FAILED"
 
 _MAX_STEPS_PER_ADVANCE = 20  # safety bound against an accidental infinite loop
 
+# Phase 8 failure lab, scenario 9 (saga-crash-resume): an order carrying
+# this marker SKU makes advance_saga pause itself immediately after
+# SELECT_AND_RESERVE commits (reservation already made, context already
+# holds the chosen node) — the exact on-disk state a real process crash
+# between those two steps would leave (RISKS.md #11). Deliberately
+# data-driven (keyed off the order's own items, not off timing of an
+# out-of-band admin call) so this is reachable through the *real*,
+# automatic order.validated consumer with no race against it: whichever
+# process happens to consume the event pauses the same way, every time.
+CRASH_SIMULATION_SKU = "SKU-SAGA-CRASH-SIMULATION"
+CRASH_SIMULATION_PAUSE_AFTER_STEP = STEP_SELECT_AND_RESERVE
+
 
 def _already_processed(db: Session, event_id: str) -> bool:
     return db.get(ProcessedEvent, (CONSUMER_NAME, uuid.UUID(event_id))) is not None
@@ -408,6 +420,15 @@ def _observe_saga_duration(saga: SagaInstance) -> None:
     SAGA_DURATION_SECONDS.labels(result).observe((now - created_at).total_seconds())
 
 
+def _should_pause_for_crash_simulation(saga: SagaInstance, step_just_run: str) -> bool:
+    if step_just_run != CRASH_SIMULATION_PAUSE_AFTER_STEP:
+        return False
+    if saga.context.get("_crash_simulated"):
+        return False  # already paused once for this saga — don't pause again after resume
+    items = saga.context.get("items") or []
+    return any(item.get("sku") == CRASH_SIMULATION_SKU for item in items)
+
+
 def advance_saga(
     db: Session,
     order_client: OrderServiceClient,
@@ -417,8 +438,18 @@ def advance_saga(
     for _ in range(_MAX_STEPS_PER_ADVANCE):
         if saga.status != STATUS_RUNNING:
             return
-        handler = _STEP_HANDLERS[saga.current_step]
+        step_to_run = saga.current_step
+        handler = _STEP_HANDLERS[step_to_run]
         handler(db, order_client, inventory_client, saga)
+        if saga.status == STATUS_RUNNING and _should_pause_for_crash_simulation(saga, step_to_run):
+            saga.context["_crash_simulated"] = True
+            db.commit()
+            logger.info(
+                "saga %s paused after %s to simulate a mid-saga crash (Phase 8 failure lab)",
+                saga.id,
+                step_to_run,
+            )
+            return
         if saga.status != STATUS_RUNNING:
             _observe_saga_duration(saga)
             return
@@ -444,13 +475,21 @@ def handle_order_validated(
     existing = _find_saga(db, order_id)
     if existing is not None:
         # A saga already exists for this order — e.g. order.validated was
-        # redelivered. Record this event as seen; if the existing saga
-        # never reached a terminal state for some other reason, let it
-        # continue from wherever it is.
-        _mark_processed(db, envelope.event_id)
-        db.commit()
+        # redelivered, or advance_saga raised on a previous delivery attempt
+        # of this exact event (see below) and Kafka is retrying it. Only
+        # mark the event processed *after* advance_saga returns without
+        # raising: marking it first (the previous, buggy ordering) let a
+        # transient failure (RemoteServiceError from a downstream outage,
+        # any unhandled exception) leave the saga permanently stuck RUNNING
+        # with no DLQ entry and no further retry — `_already_processed`
+        # would short-circuit every subsequent redelivery of the same
+        # event_id into a silent no-op, invisible to both the Kafka-level
+        # retry/backoff and the dead-letter path. Found for real running
+        # Phase 8's downstream-outage scenario against a live stack.
         if existing.status == STATUS_RUNNING:
             advance_saga(db, order_client, inventory_client, existing)
+        _mark_processed(db, envelope.event_id)
+        db.commit()
         return
 
     saga = SagaInstance(
@@ -461,10 +500,11 @@ def handle_order_validated(
         context={},
     )
     db.add(saga)
-    _mark_processed(db, envelope.event_id)
-    db.commit()
+    db.commit()  # persist the row itself so a retry after a raise below can find it via _find_saga
 
     advance_saga(db, order_client, inventory_client, saga)
+    _mark_processed(db, envelope.event_id)
+    db.commit()
 
 
 def handle_order_cancelled(
@@ -497,12 +537,32 @@ def resume_incomplete_sagas(
     db: Session, order_client: OrderServiceClient, inventory_client: InventoryServiceClient
 ) -> int:
     """Called once at consumer startup — resumes any saga left `RUNNING` by
-    a previous process that crashed mid-saga."""
+    a previous process that crashed mid-saga.
+
+    A single unresumable saga (e.g. one referencing an order_id that no
+    longer exists in order-service — real, orphaned dev data found during
+    Phase 8 validation: a stale RUNNING saga from earlier synthetic-
+    generator testing, RISKS.md) must never crash the whole process at
+    startup: that would make the *entire orchestrator* permanently
+    unable to start, not just fail loud for that one saga (the existing,
+    narrower documented gap in RISKS.md #11). Each saga is resumed
+    independently; one that raises is marked FAILED with the error
+    recorded, and every other saga still gets its chance to resume.
+    """
     running = (
         db.execute(select(SagaInstance).where(SagaInstance.status == STATUS_RUNNING))
         .scalars()
         .all()
     )
     for saga in running:
-        advance_saga(db, order_client, inventory_client, saga)
+        try:
+            advance_saga(db, order_client, inventory_client, saga)
+        except Exception as exc:  # noqa: BLE001 - one broken saga must not block every other one
+            logger.error(
+                "failed to resume saga %s for order %s at startup: %s", saga.id, saga.order_id, exc
+            )
+            saga.status = STATUS_FAILED
+            saga.current_step = STEP_DONE
+            saga.last_error = f"failed to resume at startup: {exc}"
+            db.commit()
     return len(running)

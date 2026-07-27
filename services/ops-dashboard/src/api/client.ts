@@ -13,6 +13,7 @@ export const API_BASE = {
   inventory: "/inventory-api",
   orchestrator: "/orchestrator-api",
   prometheus: "/prom-api",
+  failureLab: "/failure-lab-api",
 } as const;
 
 export class ApiError extends Error {

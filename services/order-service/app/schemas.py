@@ -79,3 +79,13 @@ class ErrorResponse(BaseModel):
     error_code: str
     message: str
     correlation_id: str | None = None
+
+
+class ProcessedEventStatus(BaseModel):
+    """Phase 8 (failure lab) internal read model — see
+    `GET /internal/failure-lab/processed-events/{event_id}`."""
+
+    event_id: uuid.UUID
+    consumer_name: str
+    processed: bool
+    processed_at: datetime | None

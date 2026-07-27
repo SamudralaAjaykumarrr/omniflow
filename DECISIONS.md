@@ -5,6 +5,80 @@ architectural decisions get a full ADR under `docs/adrs/`; this log also
 captures smaller in-flight calls that don't warrant a standalone ADR, plus
 pointers to the ADRs when they do.
 
+## 2026-07-26 — Phase 8: Failure laboratory
+
+- **A new `failure-lab` service, not new endpoints scattered across
+  existing services.** Each of the 10 scenarios orchestrates several
+  existing services (create an order through the gateway, poll the
+  orchestrator's saga state, toggle inventory-service's fault injection,
+  publish raw Kafka records) and needs its own run-history persistence.
+  That orchestration is a *client* of the existing services, the same
+  relationship the ops dashboard already has to them — it doesn't belong
+  inside any one of their domain models. See
+  `docs/phase-8-failure-laboratory.md` "Why a new service."
+- **The exact 10 scenarios were not re-derived from scratch.** `services/
+  ops-dashboard/src/api/mock/failureLab.ts` (Phase 7's inert preview)
+  already named and justified all 10, each grounded in a mechanism this
+  repo had already built. Phase 8 makes that documented plan real rather
+  than inventing a different list; the mock file is deleted once the real
+  catalog replaces it.
+- **Two new topic-isolated "chaos" mechanisms instead of using real
+  business topics for synthetic failure content.** `poison-message-dlq`
+  needed a consumer that fails *unconditionally and permanently* — running
+  that against a real business topic would have meant either poisoning a
+  real production consumer (crash risk, see the bugs below) or adding
+  marker-SKU logic to a real saga step for a scenario that isn't really
+  about payment or inventory. Instead it gets its own topic
+  (`failure-lab.poison`) and its own dedicated worker
+  (`app.poison_consumer`), reusing the exact same `event_contracts.
+  run_consume_loop`/DLQ mechanism every real consumer uses, with zero risk
+  to real order/inventory data. `malformed-kafka-record` and
+  `late-event-arrival`, by contrast, *do* use real event-catalog topics
+  (`inventory.low`, `order.shipped`) — deliberately chosen because grepping
+  confirmed zero transactional consumers subscribe to either, so nothing
+  outside Bronze/Silver ever has to parse the deliberately-broken content.
+- **`saga-crash-resume` is triggered by a marker SKU already present in the
+  order, not by an admin call racing the live Kafka consumer.** An earlier
+  design considered an admin endpoint that would itself create a
+  `SagaInstance` row and stop it mid-flight — but the real
+  `fulfillment-orchestrator-consumer` is *also* subscribed to
+  `order.validated` and would race that same admin call to process the
+  event first, making the "pause exactly here" contract non-deterministic.
+  Keying the pause off data already in the order (`advance_saga`'s
+  `_should_pause_for_crash_simulation`) means whichever process actually
+  consumes the event pauses identically, every time, no matter which
+  process that is or when.
+- **`downstream-outage` flips an in-process fault-injection flag rather
+  than actually stopping the `inventory-service` container.** See
+  `docs/phase-8-failure-laboratory.md` "Why not actually stop the
+  container" and `RISKS.md` #32 — an actually-triggerable `docker compose
+  stop` from a dashboard button was judged too broad a blast radius for a
+  shared dev environment, for a realism gain the in-process flag already
+  captures (the API Gateway's real `/readyz` genuinely reports `not_ready`,
+  a real dead letter genuinely gets created).
+- **Four real, pre-existing bugs found and fixed, not worked around.**
+  Running this phase's own scenarios and smoke test against a genuinely
+  live stack — not just this phase's unit tests — surfaced two bugs in the
+  shared Kafka consume loop / saga engine that predate Phase 8 entirely
+  (a malformed record could crash any consumer forever; one orphaned saga
+  could crash the whole orchestrator at every startup), one bug specific
+  to how a brand-new saga's first failure interacts with Kafka's retry
+  mechanism, and one bug in `app.replay` that meant dead-letter replay had
+  *never actually worked* against a real dead letter since it was built in
+  Phase 2. All four are fixed at the root cause (not worked around in the
+  failure-lab service) and documented in `RISKS.md` #28-#31, per this
+  project's standing "fix the root cause" rule.
+- **`fulfillment-orchestrator`'s FastAPI process is no longer purely
+  read-only.** Its own `app/main.py` used to note "this process never
+  calls httpx itself." The new `saga-crash-resume`/`resume` route calls
+  `advance_saga` directly (the same function the separate saga-consumer
+  process calls), which does make outbound REST calls to order-service/
+  inventory-service. This is a small, deliberate widening of that
+  process's responsibility — reusing the real saga-advancement code path
+  exactly, rather than duplicating it — not an accidental side effect;
+  `HTTPXClientInstrumentor().instrument()` was added alongside it so the
+  new calls are traced like every other httpx call in this codebase.
+
 ## 2026-07-26 — Phase 7: Ops dashboard
 
 - **No backend changes, by design.** The roadmap scopes this phase as the

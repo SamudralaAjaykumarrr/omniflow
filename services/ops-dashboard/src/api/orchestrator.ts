@@ -1,4 +1,4 @@
-import { API_BASE, get } from "./client";
+import { API_BASE, get, post } from "./client";
 import type { DeadLetterEvent, SagaInstance } from "./types";
 
 const BASE = API_BASE.orchestrator;
@@ -17,4 +17,15 @@ export function getSagaInstanceForOrder(orderId: string) {
 /** GET /dead-letters — real fulfillment-orchestrator DLQ read path. */
 export function listDeadLetters(unreplayedOnly = true) {
   return get<DeadLetterEvent[]>(BASE, `/dead-letters?unreplayed_only=${unreplayedOnly}`);
+}
+
+/**
+ * POST /dead-letters/{id}/replay — added in Phase 8 (failure-lab's
+ * downstream-outage scenario needed this over HTTP, not just the CLI);
+ * republishes the dead letter's original envelope back onto its topic and
+ * marks it replayed. Closes the Phase 7 "CLI-only" limitation for this
+ * screen too.
+ */
+export function replayDeadLetter(id: string) {
+  return post<DeadLetterEvent>(BASE, `/dead-letters/${id}/replay`);
 }

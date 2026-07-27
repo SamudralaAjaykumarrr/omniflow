@@ -340,12 +340,12 @@ data, not a scripted demo mode.
 - **Order listing is client-curated, not server-listed** (see "Missing API
   contracts"). An order created outside this browser session (another
   script, another machine) won't appear until its ID is entered manually.
-- **DLQ replay is documented, not wired up.** The Dead Letter Queue screen
-  shows the exact `make replay ARGS="--id <uuid>"` command rather than a
-  "Replay" button — triggering a replay from a browser would mean either a
-  new backend endpoint (out of scope) or shelling out from a static nginx
-  container (not attempted; there is no server-side code in this image to
-  do it from).
+- ~~**DLQ replay is documented, not wired up.**~~ **Closed in Phase 8**
+  (`docs/phase-8-failure-laboratory.md`): fulfillment-orchestrator gained a
+  real `POST /dead-letters/{id}/replay` endpoint (needed for the
+  downstream-outage failure scenario's own recovery step), and the Dead
+  Letter Queue screen now has a working "Replay" button backed by it,
+  alongside the still-available `make replay` CLI.
 - **Data Quality / Data Platform / Forecasting curve are mock**, clearly
   labeled, pending a real MinIO read API (`docs/architecture.md`'s own
   named target state, not new scope invented by this phase).

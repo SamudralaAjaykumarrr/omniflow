@@ -6,11 +6,13 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.exceptions import ConcurrentUpdateError, IdempotencyKeyConflictError, OrderNotFoundError
+from app.models import ProcessedEvent
 from app.schemas import (
     CancelOrderRequest,
     CreateOrderRequest,
     OrderResponse,
     OrderStatusHistoryOut,
+    ProcessedEventStatus,
     TransitionOrderRequest,
 )
 from app.service import (
@@ -99,3 +101,31 @@ def transition_order_route(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return OrderResponse.model_validate(order)
+
+
+@router.get(
+    "/internal/failure-lab/processed-events/{event_id}",
+    response_model=ProcessedEventStatus,
+)
+def processed_event_status_route(
+    event_id: uuid.UUID,
+    consumer_name: str = "order-service-validator",
+    db: Session = Depends(get_db),
+):
+    """Read-only introspection into the idempotent-consumer ledger
+    (`processed_events`), added for Phase 8's duplicate-event-delivery
+    scenario: it needs to observe that a redelivered event_id was a true
+    no-op (processed_at unchanged), not just infer it from the order's
+    unaffected state. Internal/diagnostic only — not proxied by the API
+    Gateway to customers, same convention as /orders/{id}/transition."""
+    row = db.get(ProcessedEvent, (consumer_name, event_id))
+    if row is None:
+        return ProcessedEventStatus(
+            event_id=event_id, consumer_name=consumer_name, processed=False, processed_at=None
+        )
+    return ProcessedEventStatus(
+        event_id=event_id,
+        consumer_name=consumer_name,
+        processed=True,
+        processed_at=row.processed_at,
+    )

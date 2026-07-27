@@ -37,6 +37,12 @@ KAFKA_CONSUMER_RETRY_TOTAL = Counter(
 KAFKA_DEAD_LETTER_TOTAL = Counter(
     "kafka_dead_letter_total", "Messages routed to the dead-letter table/topic", ["event_type"]
 )
+KAFKA_MALFORMED_RECORD_TOTAL = Counter(
+    "kafka_malformed_record_total",
+    "Raw Kafka records that failed EventEnvelope parsing before any processing could even start "
+    "(never routed to the per-event-type dead-letter path — there is no valid envelope to route)",
+    ["topic"],
+)
 KAFKA_CONSUMER_LAG = Gauge(
     "kafka_consumer_lag",
     "Consumer lag in messages, per topic/partition (from librdkafka stats)",

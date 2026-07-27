@@ -5,7 +5,7 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from app.config import get_settings
 from app.db import get_engine
-from app.middleware import CorrelationIdMiddleware
+from app.middleware import CorrelationIdMiddleware, SimulatedOutageMiddleware
 from app.routes import router
 from app.schemas import ErrorResponse
 from event_contracts import (
@@ -34,6 +34,10 @@ app = FastAPI(
 )
 app.add_middleware(MetricsMiddleware)
 app.add_middleware(CorrelationIdMiddleware)
+# Added last so it runs first (see api-gateway/app/main.py's ordering
+# comment) — a simulated outage should short-circuit before correlation-id/
+# metrics bookkeeping, not after.
+app.add_middleware(SimulatedOutageMiddleware)
 app.include_router(router)
 FastAPIInstrumentor.instrument_app(app)
 

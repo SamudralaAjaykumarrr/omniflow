@@ -5,15 +5,32 @@ import { EmptyState } from "../components/common/EmptyState";
 import { ErrorState } from "../components/common/ErrorState";
 import { DataTable } from "../components/common/DataTable";
 import { useAsync } from "../hooks/useAsync";
-import { listDeadLetters } from "../api/orchestrator";
+import { listDeadLetters, replayDeadLetter } from "../api/orchestrator";
 import type { DeadLetterEvent } from "../api/types";
 
 export function DeadLetterQueuePage() {
   const [unreplayedOnly, setUnreplayedOnly] = useState(true);
   const [selected, setSelected] = useState<DeadLetterEvent | null>(null);
+  const [replaying, setReplaying] = useState(false);
+  const [replayError, setReplayError] = useState<Error | null>(null);
   const state = useAsync(() => listDeadLetters(unreplayedOnly), [unreplayedOnly], {
     pollIntervalMs: 15_000,
   });
+
+  async function handleReplay() {
+    if (!selected) return;
+    setReplaying(true);
+    setReplayError(null);
+    try {
+      const replayed = await replayDeadLetter(selected.id);
+      setSelected(replayed);
+      state.refetch();
+    } catch (error) {
+      setReplayError(error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      setReplaying(false);
+    }
+  }
 
   return (
     <>
@@ -83,11 +100,35 @@ export function DeadLetterQueuePage() {
           </dl>
           <h3>Payload</h3>
           <pre className="code-block">{JSON.stringify(selected.payload, null, 2)}</pre>
+
+          {selected.replayed_at ? (
+            <p className="text-muted">
+              Replayed at {new Date(selected.replayed_at).toLocaleString()}.
+            </p>
+          ) : (
+            <div className="toolbar">
+              <button
+                type="button"
+                className="btn btn--primary"
+                disabled={replaying}
+                onClick={handleReplay}
+              >
+                {replaying ? "Replaying…" : "Replay"}
+              </button>
+            </div>
+          )}
+          {replayError && (
+            <ErrorState error={replayError} onRetry={handleReplay} context="replaying this event" />
+          )}
           <p className="text-muted">
-            Replay is a CLI-only operation in this repo (deliberately — see
-            docs/phase-7-ops-dashboard.md &ldquo;Limitations&rdquo;), not wired into this dashboard:
+            Same operation as{" "}
+            <code>make replay ARGS=&quot;--id {selected.original_event_id}&quot;</code> — reachable
+            over HTTP since Phase 8 (
+            <code>
+              POST /dead-letters/{"{"}id{"}"}/replay
+            </code>
+            ).
           </p>
-          <pre className="code-block">{`make replay ARGS="--id ${selected.original_event_id}"`}</pre>
         </section>
       )}
     </>
