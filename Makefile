@@ -8,7 +8,8 @@
 	forecast-clean-safe forecast-validate \
 	dashboard-install dashboard-lint dashboard-format dashboard-format-check dashboard-typecheck \
 	dashboard-test dashboard-build dashboard-validate \
-	phase8-smoke phase8-validate clean-phase8
+	phase8-smoke phase8-validate clean-phase8 \
+	load-setup load-smoke load-baseline load-test load-stress load-spike load-clean load-validate
 
 COMPOSE := docker compose
 RUFF := python:3.12-slim
@@ -352,6 +353,108 @@ clean-phase8:
 	rm -rf services/failure-lab/.pytest_cache services/failure-lab/.mypy_cache \
 		services/failure-lab/.ruff_cache
 	find services/failure-lab -type d -name __pycache__ -exec rm -rf {} +
+
+# --- Phase 10: load testing (k6) --------------------------------------------
+# k6 (grafana/k6, pinned in docker-compose.yml's `k6` service, gated behind
+# the "load-test" Compose profile so it never starts on a plain
+# `docker compose up`/`make demo`) drives real HTTP traffic through the real
+# api-gateway container — real POST /auth/login, real order creation/
+# retrieval, real inventory lookups, real saga completion polling. See
+# docs/phase-10-load-testing.md for the full design and this session's real
+# measured results.
+#
+# GATEWAY_RATE_LIMIT_PER_MINUTE (already an env-overridable setting, no code
+# change — see docker-compose.yml/api-gateway) defaults to 120/min per
+# client IP, which every k6 VU in one container shares — even six 1-2-VU
+# scenarios running concurrently at smoke scale clear that trivially. Every
+# profile below raises it for that run only, then restores the default
+# afterward — a load-test-only configuration override, not a change to the
+# limiter's code or to `make demo`'s own defaults.
+#
+# A real bug was found wiring this up (fixed here, not worked around): each
+# Makefile recipe *line* runs in its own subshell, so setting the env var
+# only on the `up -d --no-deps api-gateway` line didn't carry to a separate
+# `run k6` line — and `docker compose run` (without --no-deps) reconciles
+# its dependencies against the *current* shell's env before running,
+# silently recreating api-gateway back to the default 120 the instant k6
+# started, even though the override had "worked" one line earlier. Verified
+# directly: `docker compose exec api-gateway env` showed the override right
+# after the `up` line, then 120 again once the `run` line had executed.
+# Fixed by (1) setting the override on both the `up` line and the `run`
+# line, and (2) passing --no-deps to `run` too, so it never re-evaluates
+# api-gateway's desired config at all.
+LOAD_RATE_LIMIT := 100000
+
+## Bring up the stack and seed the fixed load-test fulfillment node + SKU pool (idempotent, safe to rerun).
+load-setup:
+	bash scripts/load_test_setup.sh
+
+## Sanity-only load profile: trivial scale, proves every workload/token/data-seeding path works end to end.
+load-smoke: load-setup
+	@echo "[load-smoke] raising GATEWAY_RATE_LIMIT_PER_MINUTE to $(LOAD_RATE_LIMIT) for this run..."
+	GATEWAY_RATE_LIMIT_PER_MINUTE=$(LOAD_RATE_LIMIT) $(COMPOSE) up -d --no-deps api-gateway
+	@until [ "$$($(COMPOSE) ps api-gateway --format '{{.Health}}')" = "healthy" ]; do sleep 1; done
+	@mkdir -p load-test-reports && chmod 777 load-test-reports
+	GATEWAY_RATE_LIMIT_PER_MINUTE=$(LOAD_RATE_LIMIT) $(COMPOSE) --profile load-test run --rm --no-deps \
+		-e PROFILE=smoke -e LOAD_RUN_ID=$(shell date +%s)-$$$$ \
+		k6 run /scripts/scenarios.js --summary-export=/reports/smoke-summary.json
+	@echo "[load-smoke] restoring default GATEWAY_RATE_LIMIT_PER_MINUTE..."
+	$(COMPOSE) up -d --no-deps api-gateway
+
+## Baseline load profile: the "normal expected traffic" measurement (raises the rate limit for this run only).
+load-baseline: load-setup
+	@echo "[load-baseline] raising GATEWAY_RATE_LIMIT_PER_MINUTE to $(LOAD_RATE_LIMIT) for this run..."
+	GATEWAY_RATE_LIMIT_PER_MINUTE=$(LOAD_RATE_LIMIT) $(COMPOSE) up -d --no-deps api-gateway
+	@until [ "$$($(COMPOSE) ps api-gateway --format '{{.Health}}')" = "healthy" ]; do sleep 1; done
+	@mkdir -p load-test-reports && chmod 777 load-test-reports
+	GATEWAY_RATE_LIMIT_PER_MINUTE=$(LOAD_RATE_LIMIT) $(COMPOSE) --profile load-test run --rm --no-deps \
+		-e PROFILE=baseline -e LOAD_RUN_ID=$(shell date +%s)-$$$$ \
+		k6 run /scripts/scenarios.js --summary-export=/reports/baseline-summary.json
+	@echo "[load-baseline] restoring default GATEWAY_RATE_LIMIT_PER_MINUTE..."
+	$(COMPOSE) up -d --no-deps api-gateway
+
+## Load profile: ramps to a moderate sustained peak (raises the rate limit for this run only).
+load-test: load-setup
+	@echo "[load-test] raising GATEWAY_RATE_LIMIT_PER_MINUTE to $(LOAD_RATE_LIMIT) for this run..."
+	GATEWAY_RATE_LIMIT_PER_MINUTE=$(LOAD_RATE_LIMIT) $(COMPOSE) up -d --no-deps api-gateway
+	@until [ "$$($(COMPOSE) ps api-gateway --format '{{.Health}}')" = "healthy" ]; do sleep 1; done
+	@mkdir -p load-test-reports && chmod 777 load-test-reports
+	GATEWAY_RATE_LIMIT_PER_MINUTE=$(LOAD_RATE_LIMIT) $(COMPOSE) --profile load-test run --rm --no-deps \
+		-e PROFILE=load -e LOAD_RUN_ID=$(shell date +%s)-$$$$ \
+		k6 run /scripts/scenarios.js --summary-export=/reports/load-summary.json
+	@echo "[load-test] restoring default GATEWAY_RATE_LIMIT_PER_MINUTE..."
+	$(COMPOSE) up -d --no-deps api-gateway
+
+## Stress profile: intentionally pushes past comfortable capacity to find this single-instance stack's real breaking point.
+load-stress: load-setup
+	@echo "[load-stress] raising GATEWAY_RATE_LIMIT_PER_MINUTE to $(LOAD_RATE_LIMIT) for this run..."
+	GATEWAY_RATE_LIMIT_PER_MINUTE=$(LOAD_RATE_LIMIT) $(COMPOSE) up -d --no-deps api-gateway
+	@until [ "$$($(COMPOSE) ps api-gateway --format '{{.Health}}')" = "healthy" ]; do sleep 1; done
+	@mkdir -p load-test-reports && chmod 777 load-test-reports
+	GATEWAY_RATE_LIMIT_PER_MINUTE=$(LOAD_RATE_LIMIT) $(COMPOSE) --profile load-test run --rm --no-deps \
+		-e PROFILE=stress -e LOAD_RUN_ID=$(shell date +%s)-$$$$ \
+		k6 run /scripts/scenarios.js --summary-export=/reports/stress-summary.json
+	@echo "[load-stress] restoring default GATEWAY_RATE_LIMIT_PER_MINUTE..."
+	$(COMPOSE) up -d --no-deps api-gateway
+
+## Spike profile: a sudden short burst, not a ramp — checks recovery after the burst subsides.
+load-spike: load-setup
+	@echo "[load-spike] raising GATEWAY_RATE_LIMIT_PER_MINUTE to $(LOAD_RATE_LIMIT) for this run..."
+	GATEWAY_RATE_LIMIT_PER_MINUTE=$(LOAD_RATE_LIMIT) $(COMPOSE) up -d --no-deps api-gateway
+	@until [ "$$($(COMPOSE) ps api-gateway --format '{{.Health}}')" = "healthy" ]; do sleep 1; done
+	@mkdir -p load-test-reports && chmod 777 load-test-reports
+	GATEWAY_RATE_LIMIT_PER_MINUTE=$(LOAD_RATE_LIMIT) $(COMPOSE) --profile load-test run --rm --no-deps \
+		-e PROFILE=spike -e LOAD_RUN_ID=$(shell date +%s)-$$$$ \
+		k6 run /scripts/scenarios.js --summary-export=/reports/spike-summary.json
+	@echo "[load-spike] restoring default GATEWAY_RATE_LIMIT_PER_MINUTE..."
+	$(COMPOSE) up -d --no-deps api-gateway
+
+## Everything that gates Phase 10 (load testing) as done: every profile, in ascending order, plus the existing project CI gate.
+load-validate: load-smoke load-baseline load-test load-stress load-spike ci
+
+## Remove disposable local load-test report output only (k6 writes /reports as its own container user, so a host-user `rm` would hit "Permission denied" — same reasoning as forecast-clean-safe). Never touches Postgres/Redpanda/MinIO data or any Docker volume.
+load-clean:
+	docker run --rm -v $(CURDIR)/load-test-reports:/target $(PY_TEST_IMAGE) sh -c "rm -rf /target/*"
 
 ## Lint/format run in a throwaway container — no host Python toolchain is assumed (see PROJECT_STATUS.md).
 lint:

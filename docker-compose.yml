@@ -336,6 +336,27 @@ services:
       otel-collector:
         condition: service_started
 
+  # Phase 10 (load testing): k6, gated behind the "load-test" Compose
+  # profile so it never starts on a plain `docker compose up`/`make demo` —
+  # only `docker compose --profile load-test run --rm k6 ...` (wired by the
+  # Makefile's `load-*` targets) brings it up. Talks to api-gateway over the
+  # same in-network hostname every other service already uses — real
+  # traffic through the real gateway, not a bypass. See
+  # docs/phase-10-load-testing.md.
+  k6:
+    image: grafana/k6:0.54.0
+    profiles: ["load-test"]
+    environment:
+      K6_BASE_URL: http://api-gateway:8000
+      K6_INVENTORY_URL: http://inventory-service:8000
+    volumes:
+      - ./k6:/scripts:ro
+      - ./load-test-reports:/reports
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    entrypoint: ["k6"]
+
   jaeger:
     image: jaegertracing/all-in-one:1.60
     environment:

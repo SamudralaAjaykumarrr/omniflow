@@ -5,6 +5,95 @@ architectural decisions get a full ADR under `docs/adrs/`; this log also
 captures smaller in-flight calls that don't warrant a standalone ADR, plus
 pointers to the ADRs when they do.
 
+## 2026-07-27 — Phase 10: Load testing
+
+Full detail: `docs/phase-10-load-testing.md`. Scope: the load-test-tooling
+slice of Phase 10 that hadn't yet landed — coverage tooling (the other
+slice) already shipped in `docs/phase-5-engineering-quality.md`.
+
+- **k6 over Locust**, chosen after evaluating both against this repo
+  specifically: k6 is a single static binary that fits this repo's existing
+  "run every tool in a throwaway container" pattern with no
+  master/worker orchestration to build, its executor types map directly
+  onto smoke/baseline/load/stress/spike, and its declarative thresholds
+  fail the process non-zero on breach with no custom code needed — Locust
+  would have matched the repo's Python idiom better but needs custom
+  scripting to get the same fail-on-breach behavior.
+- **One script (`k6/scenarios.js`), five profiles via a `PROFILE` env var
+  and `k6/lib/profiles.js`'s per-profile config** — not five near-duplicate
+  scripts. Keeps every workload's request logic defined exactly once.
+- **`k6` lives in `docker-compose.yml` gated behind a `load-test` Compose
+  profile**, not a bare `docker run` invocation — reuses the same network,
+  the same "reach api-gateway by its real in-network hostname" precedent
+  every other service already follows, and never starts on a plain
+  `docker compose up`/`make demo`.
+- **The gateway's rate limit is overridden (env var, no code change) for
+  every load-test profile, including smoke** — found by actually running
+  it: six 1-2-VU scenarios sharing one k6 container's client IP clear the
+  default 120/min trivially, producing real 429s that would otherwise be
+  mistaken for a service defect. A load-test-only configuration override,
+  restored to the default immediately after each run.
+- **A real Makefile bug found and fixed, not worked around**: each Makefile
+  recipe *line* runs in its own subshell, so setting the rate-limit env var
+  only on the `docker compose up -d --no-deps api-gateway` line didn't
+  carry to a separate `docker compose run k6 ...` line — and `run` (without
+  `--no-deps`) silently reconciled api-gateway back to the default the
+  instant k6 started, since it re-evaluates dependency config against
+  whatever the *current* shell's environment says. Verified directly
+  (`docker compose exec api-gateway env` showed the override, then the
+  default again one line later) before fixing it by setting the override on
+  both lines and adding `--no-deps` to the `run` line too.
+- **Test data is a fixed, idempotent seed** (one fulfillment node, 100 SKUs
+  at 1,000,000 units each, `POST /stock`'s absolute-set `upsert_stock`) —
+  not a fresh random dataset per run, unlike `compose_smoke_test.sh`'s own
+  per-run-suffix convention. Load-test scripts need a *stable* dataset they
+  can look up by name across separate smoke/baseline/load/stress/spike
+  invocations; uniqueness where it actually matters (customer_id, email,
+  Idempotency-Key) comes from a per-run `RUN_ID` plus k6's own `__VU`/
+  `__ITER` instead.
+- **100 SKUs, not the originally-planned 20** — a real finding from this
+  session's own first baseline run: a 20-SKU pool shared by dozens of
+  concurrent VUs caused enough `inventory_stock` row-lock contention (ADR
+  0002's row-locking working exactly as designed) to confound "how fast can
+  the saga pipeline go" with "how much are these orders fighting over the
+  same few rows." Widened the pool specifically to separate those two
+  effects.
+- **`scripts/load_test_setup.sh` stops the Phase 4/6 Spark bronze/silver/
+  gold streaming jobs before seeding load-test data** — a real finding, not
+  a precaution: `docker stats` showed them consuming 5-6 of this host's 8
+  CPUs continuously, and one early uncalibrated run saw a single HTTP
+  request take 3m32s purely from host CPU starvation, not from anything in
+  the services actually under test. They are not part of this phase's
+  system under test; `make up`/`make demo` still bring them back for normal
+  use, since load testing does not restart them automatically.
+- **`load_test_setup.sh` also waits (best-effort, bounded timeout) for a
+  previous run's saga backlog to fully drain before handing control back**
+  — otherwise a profile run would start against a system still processing
+  the previous run's queued orders, contaminating its own
+  `order_retrieval`/`e2e_order_workflow` results and making profile-to-
+  profile comparisons meaningless. Best-effort, not a hard failure: a
+  stuck `RUNNING` saga from the already-accepted saga-resume gap
+  (`RISKS.md` #11) could in principle never clear.
+- **`e2e_order_workflow`'s poll timeout is set per-profile** (30s smoke,
+  90s baseline, 120s load/spike, 150s stress), calibrated from this
+  session's own measured saga-completion times at each scale, not a single
+  guessed number reused everywhere — the same "measure first, then set the
+  bar" precedent as `COV_THRESHOLD`.
+- **`stress`/`spike` are allowed to show real e2e degradation (75%/50%
+  reaching `SHIPPED` within their timeout) rather than being tuned to pass
+  cleanly** — the point of those two profiles is to find and report the
+  real breaking point (a single sequential saga consumer's throughput
+  ceiling, `RISKS.md` #36), not to manufacture a green run. Every profile's
+  `http_req_failed`/`http_req_duration` thresholds still passed for real at
+  every scale tested — 0% HTTP-level failures throughout.
+- **Two real dead letters, found and recovered, not hidden**: recreating
+  api-gateway between profile runs (to apply/restore the rate-limit
+  override) caused a brief Docker embedded-DNS hiccup that made two
+  in-flight `order.validated` deliveries fail resolving `inventory-service`
+  from a *different*, unrelated container. Recovered with the existing
+  `make replay ARGS="--all"` — real recovery, verified, not asserted. See
+  `RISKS.md` #37.
+
 ## 2026-07-27 — Phase 9: JWT/RBAC finalization
 
 Implementation of ADR 0009's JWT/RBAC design (self-contained JWT + RBAC,

@@ -12,15 +12,15 @@ retailer.
 
 ## Current implementation status
 
-**Phases 1-9 of 13 are done and verified** (Phase 5, Data quality, is also
-done — folded into Phase 4). **Phases 11, 13 have not been started**; parts
-of 10 and 12 have been pulled forward as a separate engineering-quality
-pass, and the Phase 4 streaming data platform has had a hardening pass on
-top (see below).
+**Phases 1-10 of 13 are done and verified** (Phase 5, Data quality, is also
+done — folded into Phase 4). **Phases 11, 13 have not been started**; part
+of 12 has been pulled forward as a separate engineering-quality pass, and
+the Phase 4 streaming data platform has had a hardening pass on top (see
+below).
 
 | Done now | Not started yet |
 |---|---|
-| Core domain (orders, inventory, API gateway) | Load testing, Terraform, career docs |
+| Core domain (orders, inventory, API gateway) | Terraform, career docs |
 | Event platform (Redpanda, saga orchestrator, DLQ, replay) | An actual GitHub-hosted CI run (workflow authored + verified locally only) |
 | Observability (structured logs, tracing, metrics, Grafana) | |
 | Data platform (Spark Bronze/Silver/Gold, data quality, backfill, malformed-event quarantine, Spark job metrics) | |
@@ -29,6 +29,7 @@ top (see below).
 | Ops dashboard (React/TypeScript, 10 screens, `docs/phase-7-ops-dashboard.md`) | |
 | Failure laboratory (10 deterministic failure scenarios, `docs/phase-8-failure-laboratory.md`) | |
 | JWT authentication + role-based authorization (`DECISIONS.md` "Phase 9") | |
+| Load testing (k6, 5 profiles, real measured results, `docs/phase-10-load-testing.md`) | |
 
 Data quality (checks + report) was originally scoped as its own phase but was
 folded into Phase 4, since the Spark plumbing it depends on was already in
@@ -96,6 +97,18 @@ Every number below comes from a command actually run against this repo (see
   `ops` token reaches the real order-service proxy, confirmed a missing
   token gets `401`, and confirmed `/healthz`/`/readyz`/`/metrics` stay
   public throughout — full detail: `DECISIONS.md` "Phase 9".
+- **Load testing (k6), five profiles run for real against the live stack,
+  0% HTTP-level failure rate at every scale tested**: real login through
+  `POST /auth/login`, real order creation/retrieval, real inventory
+  lookups, real concurrent order submissions, and a real end-to-end order →
+  fulfillment-saga workflow polled through the real gateway to `SHIPPED`.
+  `load` (28.70 req/s, 1,520 requests, p95 292.9ms) and `stress` (68
+  combined peak VUs, 2,106 requests, p95 699.0ms) both passed their own
+  declared thresholds with 0% failures; `stress`/`spike` also show honest,
+  real degradation in end-to-end fulfillment completion (75%/50% within a
+  bounded poll timeout) — the real, measured single-instance saga-consumer
+  throughput ceiling, not hidden. Full detail, every threshold, and every
+  real finding: `docs/phase-10-load-testing.md`.
 
 ## Verified engineering highlights
 
@@ -250,6 +263,26 @@ gold job (`data_platform_batch_rows_total`/`data_platform_batch_duration_seconds
 a provisioned Grafana dashboard (request rate/latency, Kafka lag/retries/
 DLQ, saga duration, DB pool).
 
+## Load testing
+
+k6 (`k6/`), run through the real `api-gateway` container over five profiles
+— smoke, baseline, load, stress, spike (`make load-smoke`/`load-baseline`/
+`load-test`/`load-stress`/`load-spike`) — each with explicit, enforced
+thresholds for error rate and p95/p99 latency/throughput, real JWT login
+via the seeded demo accounts, and deterministic, collision-free test data.
+Workloads: login, order creation, order retrieval, inventory lookup,
+concurrent order submissions, and a real end-to-end order →
+fulfillment-saga workflow (create, then poll through the real gateway to
+`SHIPPED`). All five profiles passed for real in this session — 0%
+HTTP-level failure rate at every scale tested, up to 68 combined peak VUs —
+with honest, unhidden real-world limits: `stress`/`spike` show end-to-end
+fulfillment completion degrading under real backlog pressure (a measured
+single-instance saga-consumer throughput ceiling), while the gateway/API
+layer itself stayed error-free throughout. Full detail, every threshold,
+and every real finding (including a real Makefile bug and a host-CPU
+contention issue found and fixed by actually running this):
+`docs/phase-10-load-testing.md`.
+
 ## Verified test and environment evidence
 
 Host: Docker 29.6.2 + Compose v5.3.1, 8 CPUs, 15Gi RAM, ~950G disk. No host
@@ -258,14 +291,14 @@ a container.
 
 | Suite | Passed | Failed |
 |---|---|---|
-| event-contracts | 38 | 0 |
+| event-contracts | 59 | 0 |
 | order-service | 37 | 0 |
 | inventory-service | 23 | 0 |
 | fulfillment-orchestrator | 41 | 0 |
-| api-gateway | 9 | 0 |
+| api-gateway | 30 | 0 |
 | data-platform | 145 | 0 |
-| failure-lab | 66 | 0 |
-| **Total** | **359** | **0** |
+| failure-lab | 76 | 0 |
+| **Total** | **411** | **0** |
 
 data-platform's 145 includes 91 forecasting tests (`tests/forecasting/`) —
 unit tests for synthetic-data determinism, feature/leakage correctness,
@@ -284,8 +317,9 @@ packages; `ruff check`/`ruff format --check` pass clean. Full detail,
 including every bug found and fixed while producing these numbers:
 `TEST_RESULTS.md`.
 
-**Engineering quality** (`make ci`, exit 0): combined coverage 80.3%
-(threshold 65%, `coverage.xml` generated), `bandit` 0 medium/high,
+**Engineering quality** (`make ci`, exit 0, reverified this session):
+combined coverage 80.9% (threshold 65%, `coverage.xml` generated),
+`bandit` 0 medium/high,
 `pip-audit` clean after fixing 5 CVEs outright and individually accepting 9
 with a written, verified reason each (`RISKS.md` #20), `docker compose
 config` valid, all six application images build. Full detail:
@@ -324,6 +358,15 @@ make phase8-smoke     # trigger all 10 failure-lab scenarios against the live st
 make replay ARGS="--all"  # replay unreplayed dead letters (CLI, also a dashboard button since Phase 8)
 make reset        # tear down containers and volumes for a clean slate
 make logs         # tail all service logs
+
+make load-setup   # seed fixed load-test fulfillment node + SKU pool (idempotent)
+make load-smoke   # k6 smoke profile — sanity check every workload at trivial scale
+make load-baseline # k6 baseline profile — "normal expected traffic" measurement
+make load-test    # k6 load profile — ramps to a moderate sustained peak
+make load-stress  # k6 stress profile — finds this stack's real breaking point
+make load-spike   # k6 spike profile — sudden burst, checks recovery
+make load-validate # every k6 profile + the existing project CI gate
+make load-clean   # remove local k6 report output (load-test-reports/)
 
 make setup-dev    # build the shared devtools image (once, or after editing it)
 make coverage     # all seven suites w/ coverage, combined coverage.xml, threshold-enforced
@@ -378,13 +421,15 @@ services/
   data-platform/            Spark Bronze/Silver/Gold, DQ, generator, backfill, forecasting
   ops-dashboard/            React + TypeScript ops dashboard, nginx reverse proxy (Phase 7)
   failure-lab/              10 deterministic failure scenarios, trigger/reset API (Phase 8)
+k6/                         Load-test scripts (Phase 10) — scenarios.js + lib/{config,auth,ids,profiles}.js
 infra/docker/               Compose service configs (Grafana, Prometheus, MinIO, Redpanda, OTel,
                              devtools — the shared ruff/mypy/pytest/bandit/pip-audit/pre-commit image)
 .github/workflows/           ci.yml — GitHub Actions, mirrors `make ci`
 docs/                       Architecture, event catalog, data model, data pipeline, ADRs,
                              phase-5-engineering-quality.md, phase-7-ops-dashboard.md,
-                             phase-8-failure-laboratory.md
-scripts/                    compose_smoke_test.sh (make smoke), phase8_smoke_test.sh (make phase8-smoke)
+                             phase-8-failure-laboratory.md, phase-10-load-testing.md
+scripts/                    compose_smoke_test.sh (make smoke), phase8_smoke_test.sh (make phase8-smoke),
+                             load_test_setup.sh (make load-setup)
 docker-compose.yml, Makefile, .env.example, .pre-commit-config.yaml, .dockerignore
 PROJECT_STATUS.md, RISKS.md, DECISIONS.md, TEST_RESULTS.md
 ```
@@ -459,6 +504,15 @@ Full index of all 10 ADRs: `docs/adrs/README.md`.
   still genuinely observed, not mocked (`RISKS.md` #32,
   `docs/phase-8-failure-laboratory.md`).
 
+- **Load-test numbers are laptop/Docker-Desktop measurements, not a
+  cloud-scale capacity claim** — single Postgres/api-gateway/order-service/
+  inventory-service/fulfillment-orchestrator instances, sharing an 8-CPU/
+  15Gi host with the rest of the stack. `stress`/`spike` show real,
+  measured end-to-end fulfillment degradation (a single sequential saga
+  consumer's throughput ceiling) well before any HTTP-level failure
+  appears — documented, not glossed over, in
+  `docs/phase-10-load-testing.md` 'Limitations' (`RISKS.md` #36-#38).
+
 Full risk register, with status and mitigation for each: `RISKS.md`.
 
 ## Remaining roadmap
@@ -466,14 +520,14 @@ Full risk register, with status and mitigation for each: `RISKS.md`.
 Phases 11 and 13 not yet started: AWS infrastructure in Terraform
 (authored/validated only, per
 [ADR 0007](docs/adrs/0007-terraform-not-applied.md)) and final
-documentation/career deliverables. Phases 10 and 12 are partially done — a
-coverage threshold landed in `docs/phase-5-engineering-quality.md`, but
-load testing and an actual GitHub-hosted CI run remain open. Phase 7
-(React/TypeScript ops dashboard) and Phase 8 (Failure laboratory) are done
-— see `docs/phase-7-ops-dashboard.md`/`docs/phase-8-failure-laboratory.md`.
-Phase 9 (Security hardening — dependency/SAST scanning plus JWT/RBAC) is
-now fully done — see `DECISIONS.md` "Phase 9". Full scope per phase:
-`PROJECT_STATUS.md`.
+documentation/career deliverables. Phase 12 is partially done — the CI
+workflow is authored and its steps verified locally via `make ci`, but an
+actual GitHub-hosted run remains open. Phase 7 (React/TypeScript ops
+dashboard) and Phase 8 (Failure laboratory) are done — see
+`docs/phase-7-ops-dashboard.md`/`docs/phase-8-failure-laboratory.md`. Phase
+9 (Security hardening) is done — see `DECISIONS.md` "Phase 9". Phase 10
+(load testing) is now done — see `docs/phase-10-load-testing.md`. Full
+scope per phase: `PROJECT_STATUS.md`.
 
 ## License status
 

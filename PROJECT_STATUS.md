@@ -1,9 +1,19 @@
 # Project Status
 
-Last updated: 2026-07-27 (Phase 9, JWT/RBAC finalization, complete and
-verified — see notes below).
+Last updated: 2026-07-27 (Phase 10, load testing, complete and verified —
+see notes below).
 
 ## Current phase
+
+**Phase 10 (load testing) complete and verified.** k6 load/performance
+testing (branch `phase-10-load-testing`) against the real running stack:
+real login through `POST /auth/login`, real order creation/retrieval, real
+inventory lookups, real concurrent order submissions, and a real end-to-end
+order → fulfillment-saga workflow (poll to `SHIPPED` through the real
+gateway) — five profiles (smoke/baseline/load/stress/spike), each with
+explicit, enforced thresholds (error rate, p95/p99 latency, throughput),
+all passing for real against this session's live `docker compose` stack.
+Full detail: `docs/phase-10-load-testing.md`.
 
 **Phase 9 (JWT/RBAC finalization) complete and verified.** Self-contained
 JWT authentication + role-based authorization (ADR 0009): a real `users`
@@ -82,7 +92,7 @@ targets, 91 new tests, and an end-to-end local smoke test
 | 7. Ops dashboard | **Done** | React + TypeScript, 10 screens, nginx reverse proxy, no backend changes — see below and `docs/phase-7-ops-dashboard.md` |
 | 8. Failure laboratory | **Done** | 10 deterministic failure scenarios, new `failure-lab` service, dashboard control panel — see below and `docs/phase-8-failure-laboratory.md` |
 | 9. Security hardening | **Done** | Dependency/SAST scanning (bandit + pip-audit) — see `docs/phase-5-engineering-quality.md`; JWT/RBAC (users table, bcrypt, role-ranked authorization, 401/403 boundary) — see below and `DECISIONS.md` "Phase 9" |
-| 10. Testing completion + load test | Partially pulled forward | Coverage threshold (65%, measured 71.6%) + `coverage.xml` done — see `docs/phase-5-engineering-quality.md`; load test tooling still not started |
+| 10. Testing completion + load test | **Done** | Coverage threshold (65%, measured 71.6%) + `coverage.xml` — see `docs/phase-5-engineering-quality.md`; k6 load testing (5 profiles, real measured results) — see below and `docs/phase-10-load-testing.md` |
 | 11. AWS infrastructure (Terraform) | Not started | Authored + validated, never applied |
 | 12. CI/CD | Partially pulled forward | `.github/workflows/ci.yml` authored and its steps verified locally via `make ci`; not yet exercised by an actual GitHub-hosted run — see `docs/phase-5-engineering-quality.md` |
 | 13. Documentation & career deliverables | Not started | Remaining docs, final review |
@@ -524,6 +534,37 @@ restated at the top of each phase's own PR/commit as it lands.
     malformed, missing, wrong-signature, wrong-audience, wrong-issuer,
     insufficient-role) and the 401-vs-403 boundary verified both by
     automated tests and directly against the real running stack.
+- **Phase 10 application code** (load testing — see
+  `docs/phase-10-load-testing.md` for full detail):
+  - `k6/scenarios.js` + `k6/lib/{config,auth,ids,profiles}.js` — **new**:
+    one k6 script reused unchanged across five profiles
+    (smoke/baseline/load/stress/spike, selected via a `PROFILE` env var),
+    six workloads (auth login, order creation, order retrieval, inventory
+    lookup, concurrent order submissions, an end-to-end order →
+    fulfillment-saga workflow polled through the real gateway to
+    `SHIPPED`), real JWT login via the seeded demo accounts, deterministic
+    unique test data (`RUN_ID` + `__VU`/`__ITER`).
+  - `scripts/load_test_setup.sh` — **new**: idempotent load-test data seed
+    (one fulfillment node, 100 SKUs at 1,000,000 units each), stops the
+    unrelated Spark streaming jobs before seeding (found dominating this
+    host's CPU during an early run), waits for a previous run's saga
+    backlog to drain.
+  - `docker-compose.yml` — new `k6` service gated behind a `load-test`
+    Compose profile (never starts on a plain `docker compose up`/
+    `make demo`).
+  - `Makefile` — `load-setup`/`load-smoke`/`load-baseline`/`load-test`/
+    `load-stress`/`load-spike`/`load-validate`/`load-clean` targets added;
+    every profile raises the gateway's rate limit for that run only
+    (already an env-overridable setting), then restores the default.
+  - All five profiles run for real against the live stack this session:
+    0% HTTP-level failure rate and every declared threshold passed at
+    every scale tested, up to 68 combined peak VUs (`stress`) — real
+    measured numbers, real findings (a Makefile subshell bug, rate-limiter
+    interaction, SKU-pool lock contention, Spark CPU contention, a
+    Docker-DNS-hiccup-caused pair of dead letters recovered via the
+    existing replay tooling), all documented in
+    `docs/phase-10-load-testing.md`/`DECISIONS.md`/`RISKS.md` #36-#38.
+  - No Phase 1-9 application code was touched.
 
 ## Environment notes (relevant to every future phase)
 
@@ -542,13 +583,14 @@ individual queries outright, not just slowed them down.
 
 ## Next action
 
-Phase 9 (JWT/RBAC finalization) is now done — see this document's separate
-note above and `DECISIONS.md` "Phase 9". Next: Phase 11 (AWS infrastructure,
-Terraform-only per ADR 0007), Phase 13 (final documentation/career
-deliverables), and the remaining scope of Phases 10/12 (load testing, an
-actual GitHub-hosted CI run). Phase 5 (Data quality) is done, folded into
-Phase 4; Phase 6 (Demand forecasting) is done; Phase 7 (Ops dashboard) is
-done; Phase 8 (Failure laboratory) is done; Phase 9 (Security hardening —
-dependency/SAST scanning plus JWT/RBAC) is now fully done. Load-test tooling
-(rest of Phase 10), an actual GitHub-hosted CI run (rest of Phase 12), and
-Terraform (Phase 11) remain untouched.
+Phase 10 (load testing) is now done — see this document's separate note
+above and `docs/phase-10-load-testing.md`. Next: Phase 11 (AWS
+infrastructure, Terraform-only per ADR 0007), Phase 13 (final
+documentation/career deliverables), and the remaining scope of Phase 12 (an
+actual GitHub-hosted CI run — the workflow itself is authored and verified
+locally via `make ci`, see `docs/phase-5-engineering-quality.md`). Phase 5
+(Data quality) is done, folded into Phase 4; Phase 6 (Demand forecasting) is
+done; Phase 7 (Ops dashboard) is done; Phase 8 (Failure laboratory) is done;
+Phase 9 (Security hardening) is done; Phase 10 (load testing) is now fully
+done. An actual GitHub-hosted CI run (rest of Phase 12) and Terraform (Phase
+11) remain untouched.

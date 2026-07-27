@@ -1,6 +1,6 @@
 # Test Results
 
-Last updated: 2026-07-27 (Phase 9, JWT/RBAC finalization, complete).
+Last updated: 2026-07-27 (Phase 10, load testing, complete).
 
 This file is updated after every phase with real output from real commands;
 no number here is ever estimated or invented (see `RISKS.md` #4).
@@ -1145,3 +1145,95 @@ stack" standard every prior phase held itself to):
   `GET /failure-lab-api/scenarios` with no token → `401`; with a valid
   token → `200` — the dashboard's actual runtime proxy path, end to end,
   not just the underlying API in isolation.
+
+### 2026-07-27 — Phase 10: Load testing
+
+Full narrative, design, and every real finding: `docs/phase-10-load-testing.md`.
+This entry is the raw evidence: all five k6 profiles (`make load-smoke`/
+`load-baseline`/`load-test`/`load-stress`/`load-spike`) run for real against
+the live `docker compose` stack (Spark bronze/silver/gold/lag-poller
+stopped first — see below), each exiting 0 with its own declared
+thresholds passing. Numbers below are read directly from each run's
+`--summary-export` JSON (`load-test-reports/`, gitignored, regenerated per
+run — nothing here is estimated, `RISKS.md` #4).
+
+**smoke** — thresholds `http_req_failed rate<0.01`, `http_req_duration
+p(95)<2000, p(99)<3000`: **passed**. 139 requests / 118 iterations, 6.28
+req/s, 0% failed. `http_req_duration`: avg 53.9ms, p95 213.4ms, p99 243.3ms,
+max 259.6ms. e2e workflow: 1/1 reached `SHIPPED` (7.17s).
+
+**baseline** — thresholds `http_req_failed rate<0.01`, `http_req_duration
+p(95)<1500, p(99)<2500` (+ per-scenario p95 caps), `http_reqs count>100`:
+**passed**. 783 requests / 748 iterations, 12.42 req/s, 0% failed.
+`http_req_duration`: avg 52.9ms, p95 244.1ms, p99 265.9ms, max 279.7ms.
+Per-scenario p95: `order_creation` 64.7ms, `order_retrieval` 40.7ms,
+`inventory_lookup` 27.1ms. e2e workflow: 3/3 reached `SHIPPED`, avg 6.72s,
+p95 8.03s.
+
+**load** — thresholds `http_req_failed rate<0.02`, `http_req_duration
+p(95)<2500, p(99)<4000`, `http_reqs count>150`: **passed**. 1,520 requests
+/ 1,476 iterations, 28.70 req/s, 0% failed. `http_req_duration`: avg
+75.5ms, p95 292.9ms, p99 350.1ms, max 963.8ms. e2e workflow: 4/4 reached
+`SHIPPED`, avg 7.11s, p95 11.28s.
+
+**stress** — thresholds `http_req_failed rate<0.20`, `http_req_duration
+p(95)<6000` (deliberately wide — the point is to find the real breaking
+point, not force a clean pass): **passed**. 2,106 requests / 1,534
+iterations, 8.55 req/s, 0% HTTP-level failures across 68 combined peak
+VUs. `http_req_duration`: avg 237.6ms, p95 699.0ms, p99 1.03s, max 1.37s.
+e2e workflow: **3/4 (75%) reached `SHIPPED`** within a 150s poll timeout —
+real, honest degradation under load, not hidden; a 5th iteration was cut
+off by the scenario's own window before it could start.
+
+**spike** — thresholds `http_req_failed rate<0.25`, `http_req_duration
+p(95)<6000`: **passed**. 1,143 requests / 777 iterations, 6.16 req/s, 0%
+HTTP-level failures across a sudden 41-VU peak. `http_req_duration`: avg
+143.1ms, p95 472.4ms, p99 700.6ms, max 812.0ms. e2e workflow: **1/2 (50%)
+reached `SHIPPED`** within a 120s poll timeout, 2 further iterations cut
+off by the scenario's own window — a sudden burst degrades e2e completion
+more than `load`'s comparable sustained ramp, exactly what this profile is
+for.
+
+**Across all five real runs: 0% HTTP-level failure rate, every declared
+threshold passed, and correctness held throughout** — 0 orders
+double-reserved, 0 new *incorrect* dead letters.
+
+**Real findings from actually running this** (full detail and root causes:
+`docs/phase-10-load-testing.md`, `DECISIONS.md`, `RISKS.md` #36-#38):
+1. A Makefile bug (each recipe line runs in its own subshell) let
+   `docker compose run` silently reconcile api-gateway's rate-limit
+   override back to the default the instant k6 started — fixed by setting
+   the override on both lines and adding `--no-deps` to the `run` line.
+2. Even smoke-scale traffic (6-7 combined VUs) clears the gateway's
+   default 120/min per-client-IP rate limit trivially, since every k6 VU
+   shares one container's IP — verified via real 429s before the fix
+   (a documented, load-test-only config override, restored after every run).
+3. A 20-SKU seed pool caused real `inventory_stock` row-lock contention
+   (ADR 0002 working as designed) that confounded saga-throughput
+   measurements — widened to 100 SKUs.
+4. The Phase 4/6 Spark streaming jobs consumed 5-6 of this host's 8 CPUs
+   continuously; one early run saw a single request take 3m32s from pure
+   host contention. `scripts/load_test_setup.sh` now stops them before
+   seeding load-test data.
+5. Two real dead letters were caused by a brief Docker embedded-DNS hiccup
+   when api-gateway was recreated between profile runs (affecting an
+   unrelated container's in-flight call to `inventory-service`) — both
+   recovered for real via the existing `make replay ARGS="--all"`.
+6. A genuine capacity finding, not a bug: the real order → fulfillment-saga
+   pipeline sustains ~28.7 orders/sec at `load` scale with 0% failures and
+   sub-12s p99 saga completion, and holds 0% HTTP failure rate even at
+   `stress` scale (68 combined VUs) — the single sequential saga consumer
+   (`RISKS.md` #8/#13, ADR 0004) degrades gracefully under real backlog
+   pressure rather than failing outright.
+
+**Regression check**: `make test` (all seven Python suites) and `make
+smoke` were rerun after this phase's changes — unchanged from Phase 9
+(411 passed, 0 failed backend; the real order lifecycle end to end still
+reaches `SHIPPED`) — no Phase 1-9 application code was touched by this
+phase.
+
+**Limitations**: single Docker Desktop/WSL2 host (8 CPUs, 15Gi RAM), not a
+cloud-scale claim — see `docs/phase-10-load-testing.md` "Limitations" for
+the full reasoning (Postgres/SQLAlchemy pool ceilings, the in-process rate
+limiter's single-instance posture, the single-consumer saga throughput
+ceiling).
