@@ -12,15 +12,14 @@ retailer.
 
 ## Current implementation status
 
-**Phases 1-10 of 13 are done and verified** (Phase 5, Data quality, is also
-done — folded into Phase 4). **Phases 11, 13 have not been started**; part
-of 12 has been pulled forward as a separate engineering-quality pass, and
-the Phase 4 streaming data platform has had a hardening pass on top (see
-below).
+**Phases 1-11 of 13 are done and verified** (Phase 5, Data quality, is also
+done — folded into Phase 4). **Phase 13 has not been started**; part of 12
+has been pulled forward as a separate engineering-quality pass, and the
+Phase 4 streaming data platform has had a hardening pass on top (see below).
 
 | Done now | Not started yet |
 |---|---|
-| Core domain (orders, inventory, API gateway) | Terraform, career docs |
+| Core domain (orders, inventory, API gateway) | Career docs (Phase 13) |
 | Event platform (Redpanda, saga orchestrator, DLQ, replay) | An actual GitHub-hosted CI run (workflow authored + verified locally only) |
 | Observability (structured logs, tracing, metrics, Grafana) | |
 | Data platform (Spark Bronze/Silver/Gold, data quality, backfill, malformed-event quarantine, Spark job metrics) | |
@@ -30,6 +29,7 @@ below).
 | Failure laboratory (10 deterministic failure scenarios, `docs/phase-8-failure-laboratory.md`) | |
 | JWT authentication + role-based authorization (`DECISIONS.md` "Phase 9") | |
 | Load testing (k6, 5 profiles, real measured results, `docs/phase-10-load-testing.md`) | |
+| AWS infrastructure (Terraform, authored + validated, never applied, `infra/terraform/README.md`) | |
 
 Data quality (checks + report) was originally scoped as its own phase but was
 folded into Phase 4, since the Spark plumbing it depends on was already in
@@ -283,6 +283,27 @@ and every real finding (including a real Makefile bug and a host-CPU
 contention issue found and fixed by actually running this):
 `docs/phase-10-load-testing.md`.
 
+## AWS infrastructure (Terraform)
+
+Per [ADR 0007](docs/adrs/0007-terraform-not-applied.md): realistic, modular
+Terraform under `infra/terraform/` (13 modules + `dev`/`prod` environments)
+mapping the running stack onto ECS Fargate (all 13 application deployables),
+RDS PostgreSQL, MSK (managed Kafka, IAM auth), S3 (replacing MinIO, same
+prefix layout), EMR Serverless (Spark bronze/silver/gold, per ADR 0005's own
+named cloud target), ElastiCache Redis (modeled for `RISKS.md` #13's
+documented next step, not yet consumed by application code), an ALB with
+host-based routing to api-gateway/ops-dashboard, least-privilege IAM per
+service, Secrets Manager for every credential (Terraform-generated, never a
+literal value in a tfvars file), and CloudWatch for logs/metrics/alarms —
+**authored and validated only** (`terraform fmt`/`init -backend=false`/
+`validate`, all via the official `hashicorp/terraform` Docker image, zero
+warnings): no AWS credentials were used, no AWS API was called, and nothing
+here has ever been planned, applied, or paid for. Full architecture, cost
+drivers, and every documented limitation (a manual per-service-database
+bootstrap step, ops-dashboard's nginx resolver needing an AWS-specific
+change, tracing having no cloud backend wired up, EMR Serverless
+custom-image compatibility): `infra/terraform/README.md`.
+
 ## Verified test and environment evidence
 
 Host: Docker 29.6.2 + Compose v5.3.1, 8 CPUs, 15Gi RAM, ~950G disk. No host
@@ -376,6 +397,11 @@ make docker-validate  # docker compose config
 make docker-build     # build all six application images (incl. ops-dashboard, failure-lab)
 make ci           # the full local gate: format-check, lint, typecheck, coverage, security, dashboard, docker
 
+make tf-fmt-check   # terraform fmt -check -recursive over infra/terraform
+make tf-init        # terraform init -backend=false, every module + environment (no credentials, no AWS calls)
+make tf-validate    # terraform validate, every module + environment
+make tf-validate-all # fmt-check + init + validate, in that order — never plan or apply
+
 make dashboard-install / dashboard-lint / dashboard-format / dashboard-format-check
                   # ops dashboard: npm install / eslint / prettier --write / prettier --check
 make dashboard-typecheck / dashboard-test / dashboard-build
@@ -424,6 +450,9 @@ services/
 k6/                         Load-test scripts (Phase 10) — scenarios.js + lib/{config,auth,ids,profiles}.js
 infra/docker/               Compose service configs (Grafana, Prometheus, MinIO, Redpanda, OTel,
                              devtools — the shared ruff/mypy/pytest/bandit/pip-audit/pre-commit image)
+infra/terraform/            AWS infrastructure (Phase 11) — 13 modules (networking, security, ecr,
+                             iam, secrets, rds, elasticache, msk, s3, alb, ecs, emr, observability) +
+                             dev/prod environments; authored + validated only, never applied (ADR 0007)
 .github/workflows/           ci.yml — GitHub Actions, mirrors `make ci`
 docs/                       Architecture, event catalog, data model, data pipeline, ADRs,
                              phase-5-engineering-quality.md, phase-7-ops-dashboard.md,
@@ -513,21 +542,33 @@ Full index of all 10 ADRs: `docs/adrs/README.md`.
   appears — documented, not glossed over, in
   `docs/phase-10-load-testing.md` 'Limitations' (`RISKS.md` #36-#38).
 
+- **Terraform (Phase 11) has never been applied** — authored and validated
+  (`fmt`/`init -backend=false`/`validate`, zero warnings) only, per ADR
+  0007. Deploying it for real would additionally need: an out-of-band ACM
+  certificate + DNS, a manual per-service-database bootstrap step (RDS
+  creates only 1 of 5 logical databases), a small application-config change
+  to `ops-dashboard/nginx.conf`'s DNS resolver, a small fallback in
+  `data-platform/app/s3.py` for IAM-role-based S3 auth, and a distributed
+  tracing backend (none is wired up — CloudWatch replaces
+  Jaeger/Prometheus/Grafana for logs/metrics/alarms only). Every one of
+  these is named, not silently assumed solved — full detail:
+  `infra/terraform/README.md` 'Explicit assumptions and limitations'.
+
 Full risk register, with status and mitigation for each: `RISKS.md`.
 
 ## Remaining roadmap
 
-Phases 11 and 13 not yet started: AWS infrastructure in Terraform
-(authored/validated only, per
-[ADR 0007](docs/adrs/0007-terraform-not-applied.md)) and final
-documentation/career deliverables. Phase 12 is partially done — the CI
-workflow is authored and its steps verified locally via `make ci`, but an
-actual GitHub-hosted run remains open. Phase 7 (React/TypeScript ops
-dashboard) and Phase 8 (Failure laboratory) are done — see
+Phase 13 (final documentation/career deliverables) not yet started. Phase
+12 is partially done — the CI workflow is authored and its steps verified
+locally via `make ci`, but an actual GitHub-hosted run remains open. Phase
+11 (AWS infrastructure in Terraform, authored/validated only, per
+[ADR 0007](docs/adrs/0007-terraform-not-applied.md)) is now done — see
+`infra/terraform/README.md`. Phase 7 (React/TypeScript ops dashboard) and
+Phase 8 (Failure laboratory) are done — see
 `docs/phase-7-ops-dashboard.md`/`docs/phase-8-failure-laboratory.md`. Phase
 9 (Security hardening) is done — see `DECISIONS.md` "Phase 9". Phase 10
-(load testing) is now done — see `docs/phase-10-load-testing.md`. Full
-scope per phase: `PROJECT_STATUS.md`.
+(load testing) is done — see `docs/phase-10-load-testing.md`. Full scope
+per phase: `PROJECT_STATUS.md`.
 
 ## License status
 

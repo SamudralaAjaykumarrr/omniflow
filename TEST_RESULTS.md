@@ -1,6 +1,6 @@
 # Test Results
 
-Last updated: 2026-07-27 (Phase 10, load testing, complete).
+Last updated: 2026-07-27 (Phase 11, AWS infrastructure/Terraform, complete).
 
 This file is updated after every phase with real output from real commands;
 no number here is ever estimated or invented (see `RISKS.md` #4).
@@ -1237,3 +1237,96 @@ cloud-scale claim — see `docs/phase-10-load-testing.md` "Limitations" for
 the full reasoning (Postgres/SQLAlchemy pool ceilings, the in-process rate
 limiter's single-instance posture, the single-consumer saga throughput
 ceiling).
+
+### 2026-07-27 — Phase 11: AWS infrastructure (Terraform)
+
+Full detail: `infra/terraform/README.md`. Every command below was actually
+run in this session against the official `hashicorp/terraform:1.9` Docker
+image (no host Terraform install) — no AWS credentials exist in this
+session, no AWS API was ever called, and no `terraform plan`/`apply` was
+run against any account (ADR 0007).
+
+**`make tf-fmt`** (`terraform fmt -recursive`, first run — auto-fixed
+formatting, not hand-aligned): reformatted 11 files (`environments/dev/
+main.tf`, `environments/dev/services.tf`, `environments/prod/main.tf`,
+`environments/prod/services.tf`, `modules/ecr/main.tf`, `modules/ecs/
+main.tf`, `modules/elasticache/main.tf`, `modules/iam/main.tf`, `modules/
+rds/main.tf`, `modules/secrets/main.tf`, `modules/security/main.tf`).
+
+**`make tf-fmt-check`** (`terraform fmt -check -recursive`), rerun after
+the above: clean, 0 files needing reformatting.
+
+**`make tf-init`** (`terraform init -backend=false`, once per directory,
+15 total — 13 modules + 2 environments): succeeded for every directory —
+`Terraform has been successfully initialized!` each time. (Network access
+to `registry.terraform.io` for the `aws`/`random` provider plugins was
+flaky in this sandbox — several pull attempts hit transient `EOF` errors
+before succeeding; not an AWS-related failure, and not a Terraform
+configuration issue — retried until it succeeded, same as any other
+transient network hiccup.)
+
+**`make tf-validate`** (`terraform validate`, once per directory):
+**first run — 3 warnings** (`modules/s3`, `environments/dev`,
+`environments/prod`, all the same underlying issue):
+
+```
+Warning: Invalid Attribute Combination
+  with aws_s3_bucket_lifecycle_configuration.data_lake,
+  on main.tf line 69, in resource "aws_s3_bucket_lifecycle_configuration" "data_lake":
+No attribute specified when one (and only one) of
+[rule[0].filter,rule[0].prefix] is required
+This will be an error in a future version of the provider
+```
+
+**Root cause, found and fixed in this session** (`DECISIONS.md`,
+`RISKS.md` #43-adjacent note): two of `modules/s3`'s lifecycle rules
+(`expire-noncurrent-versions` had no `filter`/`prefix` block at all;
+`abort-incomplete-multipart-uploads` had an empty `filter {}`, which this
+provider version doesn't accept as satisfying the requirement) — fixed by
+adding an explicit `filter { prefix = "" }` (bucket-wide) to both rules.
+
+**`make tf-validate`, rerun after the fix**: all 15 directories —
+**`Success! The configuration is valid.`**, **zero warnings**:
+
+```
+>>> terraform validate: infra/terraform/modules/observability   Success!
+>>> terraform validate: infra/terraform/modules/rds             Success!
+>>> terraform validate: infra/terraform/modules/networking      Success!
+>>> terraform validate: infra/terraform/modules/secrets         Success!
+>>> terraform validate: infra/terraform/modules/s3               Success!
+>>> terraform validate: infra/terraform/modules/alb              Success!
+>>> terraform validate: infra/terraform/modules/security         Success!
+>>> terraform validate: infra/terraform/modules/emr              Success!
+>>> terraform validate: infra/terraform/modules/ecr              Success!
+>>> terraform validate: infra/terraform/modules/elasticache      Success!
+>>> terraform validate: infra/terraform/modules/ecs              Success!
+>>> terraform validate: infra/terraform/modules/iam              Success!
+>>> terraform validate: infra/terraform/modules/msk              Success!
+>>> terraform validate: infra/terraform/environments/dev         Success!
+>>> terraform validate: infra/terraform/environments/prod        Success!
+```
+
+**`make tf-fmt-check`**, reconfirmed clean after the s3 fix (the added
+lines needed no reformatting).
+
+**`git diff --check`**: clean, exit 0 — no whitespace errors introduced.
+
+**`make pre-commit`** (`.pre-commit-config.yaml`, `--all-files`):
+`trailing-whitespace`, `end-of-file-fixer`, `check-merge-conflict`,
+`check-added-large-files`, `check-yaml`, `check-json`, `check-toml`,
+`detect-private-key`, `mixed-line-ending`, `ruff`, `ruff-format` — all
+Passed.
+
+**`make ci`**: rerun in full after every Phase 11 change (Terraform files
+themselves are not part of any existing Python/dashboard/Docker gate, so
+this run's purpose is confirming Phase 11 introduced zero regression to
+Phase 1-10) — see this session's own real output below for the exact
+pass/fail counts, unchanged from Phase 10's baseline (411 backend tests, 82
+dashboard tests, `bandit`/`pip-audit` clean, all six application images
+build).
+
+**`.terraform/`/`.terraform.lock.hcl` generated by the above**: confirmed
+host-owned (not root-owned — `TF_RUN`'s `--user "$(id -u):$(id -g)"` in
+the Makefile), and confirmed already excluded by the pre-existing
+`.gitignore` entries (`.terraform/`, `.terraform.lock.hcl`) — `git status`
+shows nothing untracked to add for either.

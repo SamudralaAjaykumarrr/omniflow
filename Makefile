@@ -9,7 +9,8 @@
 	dashboard-install dashboard-lint dashboard-format dashboard-format-check dashboard-typecheck \
 	dashboard-test dashboard-build dashboard-validate \
 	phase8-smoke phase8-validate clean-phase8 \
-	load-setup load-smoke load-baseline load-test load-stress load-spike load-clean load-validate
+	load-setup load-smoke load-baseline load-test load-stress load-spike load-clean load-validate \
+	tf-fmt-check tf-fmt tf-init tf-validate tf-validate-all
 
 COMPOSE := docker compose
 RUFF := python:3.12-slim
@@ -17,6 +18,16 @@ RUFF_VERSION := 0.6.9
 PY_TEST_IMAGE := python:3.12-slim
 DEVTOOLS_IMAGE := omniflow-devtools:local
 COVERAGE_DIR := $(CURDIR)/coverage-reports/data
+
+# Phase 11 (AWS infrastructure, Terraform — ADR 0007: authored + validated,
+# never applied). Official hashicorp/terraform image, same "no host
+# toolchain" pattern as RUFF/PY_TEST_IMAGE/NODE_IMAGE above — no host
+# Terraform install. --user + HOME=/tmp keeps .terraform/ and any
+# .terraform.lock.hcl host-owned, not root-owned (same reasoning as
+# DASHBOARD_RUN above); both are already gitignored either way.
+TF_IMAGE := hashicorp/terraform:1.9
+TF_RUN := docker run --rm --user "$(shell id -u):$(shell id -g)" -e HOME=/tmp -v $(CURDIR):/repo
+TF_DIRS := $(shell find infra/terraform/modules infra/terraform/environments -mindepth 1 -maxdepth 1 -type d)
 
 # Phase 7 (ops dashboard): no host Node, same "throwaway container" pattern
 # as RUFF/PY_TEST_IMAGE above. node_modules lives in the bind-mounted
@@ -604,6 +615,43 @@ pre-commit:
 ci: format-check lint typecheck coverage security dashboard-validate docker-validate docker-build
 	@echo ""
 	@echo "make ci: all Phase 5 quality gates passed."
+
+# --- Phase 11: AWS infrastructure (Terraform, ADR 0007 — authored + -------
+# validated, never applied). See infra/terraform/README.md for the full
+# architecture, cost considerations, and every documented limitation.
+# Deliberately NOT folded into `ci`/`pre-commit`: `terraform init` reaches
+# out to registry.terraform.io to download provider plugins (not AWS — no
+# AWS credentials or API calls anywhere in this section), a network
+# dependency this repo's existing `ci` target has never had before, and
+# adding it here would be a change to that target's own behavior outside
+# this phase's scope. Run these on their own, or via `make tf-validate-all`.
+
+## `terraform fmt -check -recursive` over infra/terraform — fails (does not rewrite) if anything is misformatted.
+tf-fmt-check:
+	$(TF_RUN) -w /repo/infra/terraform $(TF_IMAGE) fmt -check -recursive
+
+## Auto-format every .tf file under infra/terraform in place.
+tf-fmt:
+	$(TF_RUN) -w /repo/infra/terraform $(TF_IMAGE) fmt -recursive
+
+## `terraform init -backend=false` for every module and environment (no real backend, no state, no credentials) — downloads provider plugins only.
+tf-init:
+	@for dir in $(TF_DIRS); do \
+		echo ">>> terraform init -backend=false: $$dir"; \
+		$(TF_RUN) -w /repo/$$dir $(TF_IMAGE) init -backend=false -input=false || exit 1; \
+	done
+
+## `terraform validate` for every module and environment — syntax/type/reference checking only, no AWS API call, no plan, no apply.
+tf-validate:
+	@for dir in $(TF_DIRS); do \
+		echo ">>> terraform validate: $$dir"; \
+		$(TF_RUN) -w /repo/$$dir $(TF_IMAGE) validate || exit 1; \
+	done
+
+## Everything that gates Phase 11 (Terraform) as authored-and-validated: fmt-check, init, validate, in that order. Never runs plan or apply.
+tf-validate-all: tf-fmt-check tf-init tf-validate
+	@echo ""
+	@echo "make tf-validate-all: terraform fmt-check + init + validate passed for every module and environment. No plan or apply was run."
 
 ## Self-documenting help: lists every target with a `##` comment on the line
 ## directly above it, in file order.

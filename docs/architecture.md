@@ -239,34 +239,53 @@ in `docs/data-pipeline.md`.
 
 ## AWS deployment target (Terraform, authored not applied)
 
+Full detail — module structure, IAM, cost drivers, and every documented
+limitation (the manual per-service-database bootstrap step, ops-dashboard's
+nginx resolver needing an AWS-specific change, EMR Serverless
+custom-image compatibility, tracing having no cloud backend wired up):
+`infra/terraform/README.md`. Updated in Phase 11 from the Phase 0 sketch
+below to include the services/architecture that landed in Phases 7-10
+(failure-lab, ops-dashboard) and ADR 0005's own named cloud target for the
+data platform (EMR, not just "S3 replaces MinIO").
+
 ```mermaid
 flowchart TB
-  subgraph VPC
-    ALB[Application Load Balancer]
-    subgraph ECS Fargate
-      GWc[API Gateway]
-      OSc[Order Service]
-      INVc[Inventory Service]
-      ORCHc[Fulfillment Orchestrator]
-    end
-    RDS[(RDS PostgreSQL)]
-    Redis[(ElastiCache Redis - rate limiting / caching)]
-    MSK[(MSK - managed Kafka, replaces Redpanda)]
-  end
-  S3[(S3 - replaces MinIO)]
-  CW[CloudWatch - logs/metrics/alarms]
-  SM[Secrets Manager]
-  IAM[IAM roles - least privilege per task]
+  Internet((Internet / Ops user))
 
-  Internet((Internet)) --> ALB --> GWc
-  GWc --> OSc --> RDS
-  OSc --> MSK
-  INVc --> RDS
-  ORCHc --> MSK
-  ORCHc --> RDS
-  GWc & OSc & INVc & ORCHc --> CW
-  GWc & OSc & INVc & ORCHc -.reads secrets.-> SM
-  ORCHc -.writes.-> S3
+  subgraph VPC
+    ALB[ALB - host-based routing]
+    subgraph "ECS Fargate (Cloud Map private DNS)"
+      GWc[API Gateway]
+      OSc[Order Service + validator-consumer + outbox-relay]
+      INVc[Inventory Service + outbox-relay]
+      ORCHc[Fulfillment Orchestrator + consumer + outbox-relay]
+      FLc[Failure Laboratory + poison-consumer]
+      DASHc[Ops Dashboard]
+      LAGc[lag-poller]
+    end
+    EMR[EMR Serverless - Spark bronze/silver/gold, replaces local[*] Spark]
+    RDS[(RDS PostgreSQL - 5 logical databases, 1 master user)]
+    Redis[(ElastiCache Redis - modeled for a future shared rate limiter, RISKS.md #13; not yet consumed by app code)]
+    MSK[(MSK IAM-auth - managed Kafka, replaces Redpanda)]
+  end
+  S3[(S3 - replaces MinIO, same bronze/silver/gold/checkpoints/dq-reports/forecasting prefixes)]
+  CW[CloudWatch Logs/Metrics/Alarms/Dashboard - replaces local Jaeger/Prometheus/Grafana]
+  SM[Secrets Manager - JWT secret, seeded demo-user passwords, RDS master password, DATABASE_URL secrets]
+  IAM[IAM roles - least privilege per ECS task + EMR execution role]
+
+  Internet --> ALB
+  ALB -->|default Host| GWc
+  ALB -->|dashboard_hostname| DASHc
+  GWc --> OSc & INVc
+  ORCHc --> OSc & INVc
+  FLc --> GWc & OSc & INVc & ORCHc
+  OSc & INVc & ORCHc & FLc & GWc --> RDS
+  OSc & INVc & ORCHc & FLc & LAGc --> MSK
+  EMR --> MSK
+  EMR --> S3
+  LAGc -.writes consumer_lag.-> S3
+  GWc & OSc & INVc & ORCHc & FLc & DASHc & LAGc & EMR --> CW
+  GWc & OSc & INVc & ORCHc & FLc & LAGc -.reads secrets.-> SM
 ```
 
 ## Observability flow
