@@ -13,16 +13,45 @@ on:
     branches: ["main"]
   workflow_dispatch: {}
 
+# Least-privilege: nothing in this workflow writes to the repo, opens PRs, or
+# publishes packages — read-only checkout is all any step needs.
+permissions:
+  contents: read
+
+# Keyed on the PR number when one exists, falling back to the ref otherwise,
+# so a `push` to an open PR's branch and the PR's own `pull_request` trigger
+# share one group — without this, github.ref differs between the two event
+# types for the same commit (refs/heads/<branch> vs refs/pull/<n>/merge), so
+# an outdated push-triggered run wouldn't get cancelled by a newer
+# pull_request-triggered one, or vice versa.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   quality-gate:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Measured locally (8 CPU/15Gi host): 6m50s for a smaller version of
+    # this gate (docs/phase-5-engineering-quality.md). Standard GitHub-hosted
+    # runners are 2 vCPU/7GB, and this workflow now also runs pre-commit,
+    # dashboard-validate, and two more Docker image builds than that
+    # measurement covered — 45m was an unverified guess against hosted
+    # hardware; 60m gives real headroom without masking a genuine hang.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
+      # This job builds 7 application images + the devtools image and pulls
+      # several base images (python:3.12-slim, node:22-alpine,
+      # postgres:16-alpine) — a standard GitHub-hosted runner's free disk
+      # (~14GB) is a well-known tight fit for exactly this shape of
+      # Docker-heavy workflow. Removing preinstalled toolchains this project
+      # never uses buys several GB of headroom before any Docker work starts.
+      - name: Free up runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          docker image prune -af || true
+          df -h /
 
       - name: Formatting (ruff format --check)
         run: make format-check
@@ -36,7 +65,7 @@ jobs:
       - name: Build devtools image (coverage/security/pre-commit)
         run: make setup-dev
 
-      - name: Test + coverage (272 tests, six suites, coverage.xml)
+      - name: Test + coverage (411 tests, seven suites, coverage.xml)
         run: make coverage
 
       - name: Upload coverage.xml
@@ -52,6 +81,18 @@ jobs:
 
       - name: Security scan (bandit + pip-audit)
         run: make security
+
+      # `make dashboard-install` (part of dashboard-validate below) bind-mounts
+      # services/ops-dashboard into a throwaway node:22-alpine container
+      # (see the Makefile's DASHBOARD_RUN), so `npm install` writes
+      # node_modules onto the runner's real filesystem — safe and
+      # reproducible to cache directly, keyed on package-lock.json, with no
+      # change needed to how dashboard-install itself runs.
+      - name: Cache ops-dashboard node_modules
+        uses: actions/cache@v4
+        with:
+          path: services/ops-dashboard/node_modules
+          key: ops-dashboard-node-modules-${{ hashFiles('services/ops-dashboard/package-lock.json') }}
 
       - name: Ops dashboard quality gate (lint/format/typecheck/test/build)
         run: make dashboard-validate
