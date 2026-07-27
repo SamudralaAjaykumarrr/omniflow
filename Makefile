@@ -608,11 +608,21 @@ pre-commit:
 
 ## Full local CI gate, in the order a real pipeline would fail fastest:
 ## formatting/lint (seconds) before type-checking (tens of seconds) before
+## the devtools image (needed by coverage/pre-commit/security below) before
 ## tests+coverage (minutes) before security scanning before the Docker
 ## Compose/image validation that only matters once the code itself is known
 ## good. Mirrors .github/workflows/ci.yml job-for-job. dashboard-validate
 ## (Phase 7) runs alongside the Python gates, same fail-fast ordering.
-ci: format-check lint typecheck coverage security dashboard-validate docker-validate docker-build
+## setup-dev/pre-commit are explicit prerequisites here (not left implicit)
+## because coverage/pre-commit/security all `docker run` directly against
+## omniflow-devtools:local — without setup-dev as a prerequisite, `make ci`
+## on a genuinely fresh checkout (no prior `make setup-dev` run) fails at
+## the coverage step with "Unable to find image locally", even though every
+## individual target still works fine once that image exists. Found while
+## verifying Phase 12's hosted CI workflow — the workflow itself was already
+## unaffected (it runs `make setup-dev` as its own explicit step before
+## `make coverage`), but `make ci` standalone had this latent gap.
+ci: format-check lint typecheck setup-dev coverage pre-commit security dashboard-validate docker-validate docker-build
 	@echo ""
 	@echo "make ci: all Phase 5 quality gates passed."
 
