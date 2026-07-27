@@ -83,6 +83,35 @@
   text-decoration: none;
 }
 
+.top-bar__user {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.875rem;
+}
+
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.login-form {
+  width: 100%;
+  max-width: 360px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 32px;
+}
+
+.login-form h1 {
+  margin: 0 0 4px;
+  font-size: 1.4rem;
+}
+
 .page-lede {
   color: var(--text-secondary);
   max-width: 72ch;

@@ -8,6 +8,9 @@ os.environ.setdefault(
 # would make a poll-timeout test actually take 30 seconds for no benefit.
 os.environ.setdefault("FAILURE_LAB_POLL_TIMEOUT_SECONDS", "1")
 os.environ.setdefault("FAILURE_LAB_POLL_INTERVAL_SECONDS", "0.05")
+# Phase 9 (JWT/RBAC): a test-only signing secret — this suite never talks to
+# a real api-gateway, it only needs to mint/verify tokens locally.
+os.environ.setdefault("JWT_SECRET_KEY", "test-only-secret-never-used-outside-pytest")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -16,6 +19,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 from app.config import get_settings  # noqa: E402
 from app.db import Base, get_db, get_engine  # noqa: E402
 from app.models import FailureLabDeadLetter, ScenarioReset, ScenarioRun  # noqa: E402,F401
+from event_contracts import create_access_token  # noqa: E402
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -71,3 +75,36 @@ def client(db_session):
 @pytest.fixture
 def settings():
     return get_settings()
+
+
+@pytest.fixture
+def make_token():
+    def _make(
+        *,
+        role: str = "viewer",
+        user_id: str = "user-1",
+        email: str = "user@example.com",
+        **overrides,
+    ):
+        settings = get_settings()
+        return create_access_token(
+            subject=user_id,
+            email=email,
+            role=role,
+            secret=overrides.pop("secret", settings.jwt_secret_key),
+            issuer=overrides.pop("issuer", settings.jwt_issuer),
+            audience=overrides.pop("audience", settings.jwt_audience),
+            expires_minutes=overrides.pop("expires_minutes", 30),
+        )
+
+    return _make
+
+
+@pytest.fixture
+def viewer_auth(make_token):
+    return {"Authorization": f"Bearer {make_token(role='viewer')}"}
+
+
+@pytest.fixture
+def ops_auth(make_token):
+    return {"Authorization": f"Bearer {make_token(role='ops')}"}

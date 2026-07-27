@@ -1,3 +1,5 @@
+import { useAuth } from "../../auth/useAuth";
+
 const EXTERNAL_LINKS = [
   { href: "http://localhost:3000", label: "Grafana" },
   { href: "http://localhost:16686", label: "Jaeger" },
@@ -10,6 +12,8 @@ interface TopBarProps {
 }
 
 export function TopBar({ title }: TopBarProps) {
+  const { user, logout } = useAuth();
+
   return (
     <header className="top-bar">
       <h1 className="top-bar__title">{title}</h1>
@@ -20,6 +24,16 @@ export function TopBar({ title }: TopBarProps) {
           </a>
         ))}
       </nav>
+      {user && (
+        <div className="top-bar__user">
+          <span>
+            {user.email} <span className="text-muted">({user.role})</span>
+          </span>
+          <button type="button" className="btn btn--ghost" onClick={logout}>
+            Sign out
+          </button>
+        </div>
+      )}
     </header>
   );
 }

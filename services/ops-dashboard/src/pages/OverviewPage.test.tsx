@@ -1,6 +1,7 @@
-import { render, screen, within } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { OverviewPage } from "./OverviewPage";
+import { renderWithAuth as render } from "../test/renderWithAuth";
 import * as orchestratorApi from "../api/orchestrator";
 import * as clientApi from "../api/client";
 import type { SagaInstance, DeadLetterEvent } from "../api/types";

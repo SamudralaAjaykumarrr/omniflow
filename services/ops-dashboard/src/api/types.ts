@@ -171,6 +171,25 @@ export interface ScenarioDetail {
   run_count: number;
 }
 
+/**
+ * Phase 9 (JWT/RBAC) — mirrors event_contracts.auth.Role /
+ * api-gateway's TokenResponse/MeResponse exactly.
+ */
+export type Role = "viewer" | "ops" | "admin";
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  role: Role;
+}
+
+export interface LoginResponse {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+  role: Role;
+}
+
 export interface ApiErrorBody {
   error_code?: string;
   message?: string;

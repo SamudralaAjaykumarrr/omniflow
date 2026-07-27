@@ -3,13 +3,21 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
+import { seedAuth } from "./test/renderWithAuth";
 
 describe("App routing", () => {
   // This is a routing smoke test, not a data test — every screen's own
   // fetch calls are stubbed to reject immediately so pages settle into a
   // deterministic error state instead of leaving unmocked, uncontrolled
   // network calls pending across tests/unmounts.
+  //
+  // Phase 9 (JWT/RBAC): every route below is now gated behind RequireAuth,
+  // so an unauthenticated render would redirect straight to /login instead
+  // of ever reaching these screens — seed an already-authenticated session
+  // first; the login gate itself is covered separately in
+  // auth/RequireAuth.test.tsx.
   beforeEach(() => {
+    seedAuth();
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("stubbed — not under test here")));
   });
   afterEach(() => {

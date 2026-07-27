@@ -1,11 +1,22 @@
 # Project Status
 
-Last updated: 2026-07-26 (Phase 8, Failure laboratory, complete and
+Last updated: 2026-07-27 (Phase 9, JWT/RBAC finalization, complete and
 verified — see notes below).
 
 ## Current phase
 
-**Phase 8 (Failure laboratory) complete and verified.** Ten deterministic
+**Phase 9 (JWT/RBAC finalization) complete and verified.** Self-contained
+JWT authentication + role-based authorization (ADR 0009): a real `users`
+table (bcrypt-hashed passwords) in a new api-gateway database, short-lived
+signed JWTs with issuer/audience/expiry/signature all verified, and
+`viewer`/`ops`/`admin` role enforcement (401 vs. 403, correctly
+distinguished) on api-gateway's customer-facing proxy routes and
+failure-lab's scenario trigger/reset routes — the two surfaces ADR 0009
+itself names. The ops dashboard gained a real login screen and role-aware
+UI. Dependency/SAST scanning, the other slice of Phase 9's original scope,
+already landed in Phase 5. Full detail: `DECISIONS.md` "Phase 9".
+
+Phase 8 (Failure laboratory) complete and verified. Ten deterministic
 failure scenarios, each triggerable through a real backend API
 (`services/failure-lab`, a new service) and exercised against the real
 running stack — no scenario is a UI-only simulation. Replaces the Phase 7
@@ -70,7 +81,7 @@ targets, 91 new tests, and an end-to-end local smoke test
 | 6. Demand forecasting | **Done** | Synthetic data, seasonal-naive baseline, `HistGradientBoostingRegressor` secondary model, chronological evaluation, champion selection, future forecasts — see below and `TEST_RESULTS.md` |
 | 7. Ops dashboard | **Done** | React + TypeScript, 10 screens, nginx reverse proxy, no backend changes — see below and `docs/phase-7-ops-dashboard.md` |
 | 8. Failure laboratory | **Done** | 10 deterministic failure scenarios, new `failure-lab` service, dashboard control panel — see below and `docs/phase-8-failure-laboratory.md` |
-| 9. Security hardening | Partially pulled forward | Dependency/SAST scanning (bandit + pip-audit) done — see `docs/phase-5-engineering-quality.md`; JWT/RBAC finalization, audit events still not started |
+| 9. Security hardening | **Done** | Dependency/SAST scanning (bandit + pip-audit) — see `docs/phase-5-engineering-quality.md`; JWT/RBAC (users table, bcrypt, role-ranked authorization, 401/403 boundary) — see below and `DECISIONS.md` "Phase 9" |
 | 10. Testing completion + load test | Partially pulled forward | Coverage threshold (65%, measured 71.6%) + `coverage.xml` done — see `docs/phase-5-engineering-quality.md`; load test tooling still not started |
 | 11. AWS infrastructure (Terraform) | Not started | Authored + validated, never applied |
 | 12. CI/CD | Partially pulled forward | `.github/workflows/ci.yml` authored and its steps verified locally via `make ci`; not yet exercised by an actual GitHub-hosted run — see `docs/phase-5-engineering-quality.md` |
@@ -450,6 +461,69 @@ restated at the top of each phase's own PR/commit as it lands.
     a new working Replay button on the Dead Letter Queue screen (backed by
     the same `POST /dead-letters/{id}/replay` endpoint, closing a Phase 7
     "CLI-only" limitation).
+- **Phase 9 application code** (JWT/RBAC finalization, ADR 0009 — see
+  `DECISIONS.md` "Phase 9" for the full scope-boundary reasoning):
+  - `services/event-contracts/event_contracts/auth.py` — **new shared
+    module**: JWT encode/decode (PyJWT, HS256) with issuer/audience/
+    expiration/signature all verified, a ranked `Role` (`viewer < ops <
+    admin`), and `build_current_user_dependency`/`build_require_role_dependency`
+    FastAPI-dependency factories reused by api-gateway and failure-lab —
+    same "shared helper, per-service settings" pattern as
+    `metrics_setup`/`logging_setup`/`tracing_setup`.
+  - `services/api-gateway` — gained its own Postgres database
+    (`omniflow_gateway`(`_test`), Alembic-migrated) and a `users` table
+    (`app/models.py`, bcrypt-hashed passwords via `passlib`); `app/security.py`
+    (password hashing + the gateway's own JWT dependencies); `app/seed.py`
+    (idempotent demo-user seeding at startup: `admin`/`ops`/`viewer` +
+    a scoped `ops`-role service account); `POST /auth/login`, `GET
+    /auth/me` (`app/routes.py`); `POST/GET /api/orders*` now requires
+    `ops`/`admin` for mutations, any authenticated role for reads; `GET
+    /api/inventory/stock/*` requires any authenticated role.
+    `/healthz`/`/readyz`/`/metrics` remain public.
+  - `services/failure-lab` — `app/security.py` (JWT dependencies built
+    from the same shared secret api-gateway signs with); `POST
+    /scenarios/{id}/trigger`/`reset` now require `ops`/`admin`; the
+    read-only catalog/run routes require any authenticated role.
+    `app/clients.py`'s `GatewayClient` (the only caller of api-gateway's
+    now-protected `POST /api/orders`) logs in as the seeded service
+    account and caches the resulting token, refreshing it before expiry.
+  - `services/ops-dashboard` — `src/pages/LoginPage.tsx` (new),
+    `src/auth/` (`AuthContext.tsx`/`useAuth.ts`/`context.ts`/
+    `RequireAuth.tsx`, new): sessionStorage-backed session, a route guard
+    redirecting unauthenticated users to `/login`, and role-aware
+    hide/disable on Create/Cancel Order and Failure Lab trigger/reset
+    (client-side UI convenience, not the security boundary — the
+    boundary is the backend's own 401/403). `src/api/client.ts` gained
+    `Authorization: Bearer` header injection and a 401 handler that logs
+    the session out.
+  - **Scope boundary, deliberately not expanded**: order-service,
+    inventory-service, and fulfillment-orchestrator's own HTTP routes
+    remain unauthenticated at the service level — they're called directly
+    by the real saga orchestrator and failure-lab's scenario runner with
+    no user JWT to present, and protecting them would require a second,
+    broader service-to-service auth layer ADR 0009 never scoped. See
+    `RISKS.md` #25 (updated) and #34 (new) for the precise, named gap this
+    leaves open (the dashboard's `/inventory-api/`/`/orchestrator-api/`
+    proxies still reach those two services directly, unauthenticated).
+  - `infra/docker/postgres/init-databases.sql` — `omniflow_gateway`(`_test`)
+    added. `docker-compose.yml` — api-gateway gained `GATEWAY_DATABASE_URL`,
+    `JWT_SECRET_KEY`/`JWT_ISSUER`/`JWT_AUDIENCE` (shared, not
+    service-prefixed — symmetric HS256 signing needs the exact same
+    secret on both the issuer and every verifier), and
+    `GATEWAY_SEED_*_PASSWORD` env vars, all with documented dev-only
+    defaults (no code-level fallback for the secret itself — see
+    `.env.example`); failure-lab gained the same shared `JWT_SECRET_KEY`
+    plus its own service-account login credentials.
+  - `Makefile` — `test-gateway` now migrates + tests against
+    `omniflow_gateway_test`; `migrate` extended to include api-gateway;
+    `typecheck`'s pip-install list gained `pyjwt`/`passlib`/`bcrypt`.
+  - 411 passing backend tests across seven suites (up from 359 — +21
+    event-contracts, +21 api-gateway, +10 failure-lab) and 82 passing
+    dashboard tests (up from 66, +16) — see `TEST_RESULTS.md` for the full
+    breakdown, including every negative-token case required (expired,
+    malformed, missing, wrong-signature, wrong-audience, wrong-issuer,
+    insufficient-role) and the 401-vs-403 boundary verified both by
+    automated tests and directly against the real running stack.
 
 ## Environment notes (relevant to every future phase)
 
@@ -468,13 +542,13 @@ individual queries outright, not just slowed them down.
 
 ## Next action
 
-Phase 8 (Failure laboratory) is now done — see this document's separate
-note above and `docs/phase-8-failure-laboratory.md`. Next: Phase 11 (AWS
-infrastructure, Terraform-only per ADR 0007), Phase 13 (final
-documentation/career deliverables), and the remaining scope of Phases 9/10/
-12 (JWT/RBAC, load testing, an actual GitHub-hosted CI run). Phase 5 (Data
-quality) is done, folded into Phase 4; Phase 6 (Demand forecasting) is
-done; Phase 7 (Ops dashboard) is done. Engineering-quality tooling is also done for
-the slice it covers; JWT/RBAC (rest of Phase 9), load-test tooling (rest of
-Phase 10), an actual GitHub-hosted CI run (rest of Phase 12), and Terraform
-(Phase 11) remain untouched.
+Phase 9 (JWT/RBAC finalization) is now done — see this document's separate
+note above and `DECISIONS.md` "Phase 9". Next: Phase 11 (AWS infrastructure,
+Terraform-only per ADR 0007), Phase 13 (final documentation/career
+deliverables), and the remaining scope of Phases 10/12 (load testing, an
+actual GitHub-hosted CI run). Phase 5 (Data quality) is done, folded into
+Phase 4; Phase 6 (Demand forecasting) is done; Phase 7 (Ops dashboard) is
+done; Phase 8 (Failure laboratory) is done; Phase 9 (Security hardening —
+dependency/SAST scanning plus JWT/RBAC) is now fully done. Load-test tooling
+(rest of Phase 10), an actual GitHub-hosted CI run (rest of Phase 12), and
+Terraform (Phase 11) remain untouched.

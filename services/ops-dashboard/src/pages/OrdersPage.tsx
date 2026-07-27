@@ -9,6 +9,7 @@ import { DataTable } from "../components/common/DataTable";
 import { CreateOrderForm } from "../components/forms/CreateOrderForm";
 import { useAsync } from "../hooks/useAsync";
 import { useTrackedOrders } from "../hooks/useTrackedOrders";
+import { useAuth } from "../auth/useAuth";
 import { getOrder } from "../api/orders";
 import type { Order } from "../api/types";
 
@@ -29,6 +30,7 @@ async function loadTrackedOrders(ids: string[]): Promise<TrackedOrderResult[]> {
 
 export function OrdersPage() {
   const navigate = useNavigate();
+  const { hasRole } = useAuth();
   const { ids, addOrder, removeOrder } = useTrackedOrders();
   const [manualId, setManualId] = useState("");
   const state = useAsync(() => loadTrackedOrders(ids), [ids.join(",")]);
@@ -44,12 +46,19 @@ export function OrdersPage() {
 
       <section className="panel">
         <h2>Create a demo order</h2>
-        <CreateOrderForm
-          onCreated={(order) => {
-            addOrder(order.id);
-            navigate(`/orders/${order.id}`);
-          }}
-        />
+        {hasRole("ops") ? (
+          <CreateOrderForm
+            onCreated={(order) => {
+              addOrder(order.id);
+              navigate(`/orders/${order.id}`);
+            }}
+          />
+        ) : (
+          <p className="form__note">
+            Creating an order requires the <code>ops</code> or <code>admin</code> role — the API
+            Gateway would reject this with a 403 for your current role.
+          </p>
+        )}
       </section>
 
       <section className="panel">

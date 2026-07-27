@@ -1,6 +1,8 @@
 # Build context is the repo root (see docker-compose.yml) so this can COPY
 # the sibling event-contracts package as a local dependency — the gateway
-# now uses its shared logging/tracing/metrics helpers (Phase 3).
+# now uses its shared logging/tracing/metrics helpers (Phase 3) and, since
+# Phase 9, its shared JWT/RBAC helpers plus its own Postgres-backed `users`
+# table (ADR 0009), migrated via Alembic like every other stateful service.
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -14,6 +16,7 @@ RUN pip install --no-cache-dir --upgrade pip==26.1.2 \
 
 COPY services/api-gateway /app/services/api-gateway
 WORKDIR /app/services/api-gateway
+RUN chmod +x entrypoint.sh
 
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["./entrypoint.sh"]

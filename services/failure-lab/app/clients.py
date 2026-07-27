@@ -8,6 +8,7 @@ customer request would).
 
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -69,12 +70,52 @@ class OrderRef:
 
 
 class GatewayClient(_JsonClient):
+    """Phase 9 (JWT/RBAC, ADR 0009): `POST /api/orders` now requires an
+    `ops`/`admin` JWT. This client logs in as the scoped `ops`-role service
+    account api-gateway seeds for exactly this purpose (`app.seed`,
+    `DECISIONS.md` "Phase 9") and caches the token, refreshing it a
+    little before actual expiry rather than on every single call."""
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        service_email: str | None = None,
+        service_password: str | None = None,
+        timeout: float = 10.0,
+    ) -> None:
+        super().__init__(base_url, timeout=timeout)
+        self._service_email = service_email
+        self._service_password = service_password
+        self._token: str | None = None
+        self._token_expires_at: float = 0.0
+
+    def _login(self) -> str:
+        resp = httpx.post(
+            f"{self._base_url}/auth/login",
+            json={"email": self._service_email, "password": self._service_password},
+            timeout=self._timeout,
+        )
+        _raise_for_status("POST", resp)
+        body = resp.json()
+        token: str = body["access_token"]
+        self._token = token
+        # Refresh a little early so a request in flight right as the token
+        # would expire never races a genuinely-expired one.
+        self._token_expires_at = time.monotonic() + max(body["expires_in"] - 30, 0)
+        return token
+
+    def _auth_headers(self) -> dict[str, str]:
+        if self._token is None or time.monotonic() >= self._token_expires_at:
+            self._login()
+        return {"Authorization": f"Bearer {self._token}"}
+
     def create_order(self, payload: dict, idempotency_key: str) -> dict:
-        return self._post(
-            "/api/orders", json=payload, headers={"Idempotency-Key": idempotency_key}
-        ).json()
+        headers = {"Idempotency-Key": idempotency_key, **self._auth_headers()}
+        return self._post("/api/orders", json=payload, headers=headers).json()
 
     def readyz(self) -> tuple[int, dict]:
+        # /readyz is a platform endpoint, deliberately unauthenticated.
         resp = httpx.get(f"{self._base_url}/readyz", timeout=self._timeout)
         try:
             body = resp.json()

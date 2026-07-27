@@ -56,7 +56,11 @@ def _require_entry(scenario_id: str):
 def _build_context(settings: Settings, db: Session, correlation_id: str) -> ScenarioContext:
     return ScenarioContext(
         settings=settings,
-        gateway=GatewayClient(settings.api_gateway_url),
+        gateway=GatewayClient(
+            settings.api_gateway_url,
+            service_email=settings.gateway_service_email,
+            service_password=settings.gateway_service_password,
+        ),
         order_service=OrderServiceClient(settings.order_service_url),
         inventory=InventoryServiceClient(settings.inventory_service_url),
         orchestrator=OrchestratorClient(settings.orchestrator_service_url),

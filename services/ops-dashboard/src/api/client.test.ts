@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, NetworkError, get, post } from "./client";
+import {
+  ApiError,
+  NetworkError,
+  get,
+  getAuthToken,
+  post,
+  setAuthToken,
+  setUnauthorizedHandler,
+} from "./client";
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -11,6 +19,8 @@ function jsonResponse(body: unknown, status = 200) {
 describe("api/client", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    setAuthToken(null);
+    setUnauthorizedHandler(null);
   });
 
   it("get() returns parsed JSON on a 2xx response", async () => {
@@ -55,5 +65,52 @@ describe("api/client", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
     const result = await get("/gw", "/x");
     expect(result).toBeUndefined();
+  });
+
+  describe("Phase 9 (JWT/RBAC) — auth token handling", () => {
+    it("attaches an Authorization: Bearer header once a token is set", async () => {
+      setAuthToken("my-token");
+      const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      await get("/gw", "/api/orders/1");
+
+      const [, init] = fetchMock.mock.calls[0];
+      expect(init.headers["Authorization"]).toBe("Bearer my-token");
+    });
+
+    it("sends no Authorization header when no token is set", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      await get("/gw", "/healthz");
+
+      const [, init] = fetchMock.mock.calls[0];
+      expect(init.headers).toBeUndefined();
+    });
+
+    it("getAuthToken reflects the most recently set token", () => {
+      expect(getAuthToken()).toBeNull();
+      setAuthToken("abc");
+      expect(getAuthToken()).toBe("abc");
+    });
+
+    it("invokes the registered unauthorized handler on a 401 response", async () => {
+      const handler = vi.fn();
+      setUnauthorizedHandler(handler);
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ detail: "no" }, 401)));
+
+      await expect(get("/gw", "/api/orders")).rejects.toBeInstanceOf(ApiError);
+      expect(handler).toHaveBeenCalledOnce();
+    });
+
+    it("does not invoke the unauthorized handler on a non-401 error", async () => {
+      const handler = vi.fn();
+      setUnauthorizedHandler(handler);
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ detail: "forbidden" }, 403)));
+
+      await expect(get("/gw", "/api/orders")).rejects.toBeInstanceOf(ApiError);
+      expect(handler).not.toHaveBeenCalled();
+    });
   });
 });

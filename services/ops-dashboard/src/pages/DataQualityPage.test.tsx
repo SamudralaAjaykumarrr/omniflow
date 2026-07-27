@@ -1,6 +1,7 @@
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { DataQualityPage } from "./DataQualityPage";
+import { renderWithAuth as render } from "../test/renderWithAuth";
 
 describe("DataQualityPage", () => {
   it("renders the mock-data notice and the reconciliation table", () => {

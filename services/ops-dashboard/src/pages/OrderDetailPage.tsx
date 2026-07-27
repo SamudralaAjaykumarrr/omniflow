@@ -5,10 +5,12 @@ import { ErrorState } from "../components/common/ErrorState";
 import { StatusBadge } from "../components/common/StatusBadge";
 import { CancelOrderForm } from "../components/forms/CancelOrderForm";
 import { useAsync } from "../hooks/useAsync";
+import { useAuth } from "../auth/useAuth";
 import { getOrder, getOrderHistory } from "../api/orders";
 
 export function OrderDetailPage() {
   const { orderId = "" } = useParams();
+  const { hasRole } = useAuth();
   const state = useAsync(async () => {
     const [order, history] = await Promise.all([getOrder(orderId), getOrderHistory(orderId)]);
     return { order, history };
@@ -79,7 +81,14 @@ export function OrderDetailPage() {
 
           <section className="panel">
             <h2>Cancel order</h2>
-            <CancelOrderForm order={state.data.order} onCancelled={() => state.refetch()} />
+            {hasRole("ops") ? (
+              <CancelOrderForm order={state.data.order} onCancelled={() => state.refetch()} />
+            ) : (
+              <p className="form__note">
+                Cancelling an order requires the <code>ops</code> or <code>admin</code> role — the
+                API Gateway would reject this with a 403 for your current role.
+              </p>
+            )}
           </section>
 
           <section className="panel">

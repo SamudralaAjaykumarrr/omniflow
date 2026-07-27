@@ -10,3 +10,5 @@ CREATE DATABASE omniflow_orchestrator;
 CREATE DATABASE omniflow_orchestrator_test;
 CREATE DATABASE omniflow_failure_lab;
 CREATE DATABASE omniflow_failure_lab_test;
+CREATE DATABASE omniflow_gateway;
+CREATE DATABASE omniflow_gateway_test;
