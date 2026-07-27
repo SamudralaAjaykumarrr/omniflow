@@ -8,3 +8,5 @@ CREATE DATABASE omniflow_inventory;
 CREATE DATABASE omniflow_inventory_test;
 CREATE DATABASE omniflow_orchestrator;
 CREATE DATABASE omniflow_orchestrator_test;
+CREATE DATABASE omniflow_failure_lab;
+CREATE DATABASE omniflow_failure_lab_test;

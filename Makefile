@@ -1,5 +1,5 @@
 .PHONY: help demo up down reset logs migrate setup-dev test test-contracts test-order test-inventory test-gateway \
-	test-orchestrator test-data-platform smoke replay generate dq-report backfill lint format \
+	test-orchestrator test-data-platform test-failure-lab smoke replay generate dq-report backfill lint format \
 	format-check typecheck coverage security docker-validate docker-build pre-commit ci \
 	streaming-up streaming-down inspect-bronze inspect-bronze-rejects inspect-silver \
 	inspect-silver-rejects inspect-late-events inspect-gold phase6-smoke phase6-validate clean-phase6 \
@@ -7,7 +7,8 @@
 	forecast-evaluate forecast-select forecast-run forecast-inspect forecast-test forecast-smoke \
 	forecast-clean-safe forecast-validate \
 	dashboard-install dashboard-lint dashboard-format dashboard-format-check dashboard-typecheck \
-	dashboard-test dashboard-build dashboard-validate
+	dashboard-test dashboard-build dashboard-validate \
+	phase8-smoke phase8-validate clean-phase8
 
 COMPOSE := docker compose
 RUFF := python:3.12-slim
@@ -43,6 +44,7 @@ COV_THRESHOLD := 65
 ORDER_TEST_DB := postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/omniflow_orders_test
 INVENTORY_TEST_DB := postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/omniflow_inventory_test
 ORCHESTRATOR_TEST_DB := postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/omniflow_orchestrator_test
+FAILURE_LAB_TEST_DB := postgresql+psycopg://omniflow:omniflow_dev_only@postgres:5432/omniflow_failure_lab_test
 
 ## Bring up the full local stack (build + start), matching the single-command demo requirement.
 demo: up
@@ -83,7 +85,7 @@ migrate:
 	$(COMPOSE) run --rm fulfillment-orchestrator alembic upgrade head
 
 ## Run every service's test suite against its dedicated *_test database.
-test: test-contracts test-order test-inventory test-orchestrator test-gateway test-data-platform
+test: test-contracts test-order test-inventory test-orchestrator test-gateway test-data-platform test-failure-lab
 
 ## Shared event-contracts package: schemas, envelope, Kafka helpers, consume-loop retry/DLQ logic.
 ## httpx is test-only (starlette.testclient, used by test_metrics_setup.py's
@@ -126,6 +128,16 @@ test-gateway:
 	$(COMPOSE) build api-gateway
 	$(COMPOSE) run --rm -e COVERAGE_FILE=/coverage-data/.coverage.api-gateway -v $(COVERAGE_DIR):/coverage-data \
 		api-gateway pytest --cov=app --cov-report=term-missing
+
+## Phase 8 (Failure laboratory) service: scenario catalog, trigger/reset API,
+## the 10 scenario implementations, and the poison-message consumer.
+test-failure-lab:
+	@mkdir -p $(COVERAGE_DIR)
+	$(COMPOSE) up -d postgres
+	$(COMPOSE) build failure-lab
+	$(COMPOSE) run --rm -e FAILURE_LAB_DATABASE_URL=$(FAILURE_LAB_TEST_DB) \
+		-e COVERAGE_FILE=/coverage-data/.coverage.failure-lab -v $(COVERAGE_DIR):/coverage-data \
+		failure-lab pytest --cov=app --cov-report=term-missing
 
 ## Bronze/Silver/Gold Spark jobs, DQ checks, synthetic generator, backfill
 ## tooling. No live Kafka/MinIO needed for its own suite — every test runs
@@ -308,6 +320,27 @@ dashboard-build:
 ## Everything that gates Phase 7 (ops dashboard) as done, mirroring `ci`'s fail-fast ordering.
 dashboard-validate: dashboard-install dashboard-format-check dashboard-lint dashboard-typecheck dashboard-test dashboard-build
 
+# --- Phase 8: failure laboratory (10 deterministic failure scenarios) -----
+
+## End-to-end Phase 8 smoke test: brings up the full stack, triggers all 10
+## failure-lab scenarios against the real running services, asserts each
+## reaches PASSED/RECOVERED, resets every scenario, then reruns all 10 a
+## second time to prove they're safe to rerun.
+phase8-smoke:
+	bash scripts/phase8_smoke_test.sh
+
+## Everything that gates Phase 8 (failure laboratory) as done: unit/API
+## tests, the smoke test above, and the existing project CI gate.
+phase8-validate: test-failure-lab phase8-smoke ci
+
+## Remove disposable local Phase 8 dev output only (pytest/mypy/ruff caches
+## under services/failure-lab) — never touches Postgres/Redpanda/MinIO data
+## or any Docker volume.
+clean-phase8:
+	rm -rf services/failure-lab/.pytest_cache services/failure-lab/.mypy_cache \
+		services/failure-lab/.ruff_cache
+	find services/failure-lab -type d -name __pycache__ -exec rm -rf {} +
+
 ## Lint/format run in a throwaway container — no host Python toolchain is assumed (see PROJECT_STATUS.md).
 lint:
 	docker run --rm -v $(CURDIR):/repo -w /repo $(RUFF) sh -c "pip install --quiet ruff==$(RUFF_VERSION) && ruff check ."
@@ -343,7 +376,8 @@ typecheck:
 		(cd services/inventory-service && mypy --config-file=/repo/pyproject.toml app) && \
 		(cd services/fulfillment-orchestrator && mypy --config-file=/repo/pyproject.toml app) && \
 		(cd services/api-gateway && mypy --config-file=/repo/pyproject.toml app) && \
-		(cd services/data-platform && mypy --config-file=/repo/pyproject.toml app)"
+		(cd services/data-platform && mypy --config-file=/repo/pyproject.toml app) && \
+		(cd services/failure-lab && mypy --config-file=/repo/pyproject.toml app)"
 
 ## Build the shared devtools image (ruff/mypy/pytest/coverage/bandit/pip-audit/
 ## pre-commit, pinned in infra/docker/devtools/Dockerfile) used by coverage,
@@ -407,13 +441,13 @@ security:
 		echo '--- bandit (SAST) ---' && \
 		bandit -r services/event-contracts/event_contracts services/order-service/app \
 			services/inventory-service/app services/fulfillment-orchestrator/app \
-			services/api-gateway/app services/data-platform/app \
+			services/api-gateway/app services/data-platform/app services/failure-lab/app \
 			-ll -x '*/tests/*,*/migrations/versions/*' && \
 		echo '--- pip-audit (dependency CVEs; accepted-risk IDs documented in RISKS.md #20 excluded, never silently) ---' && \
 		status=0; \
 		for req in services/order-service/requirements.txt services/inventory-service/requirements.txt \
 			services/fulfillment-orchestrator/requirements.txt services/api-gateway/requirements.txt \
-			services/data-platform/requirements.txt; do \
+			services/data-platform/requirements.txt services/failure-lab/requirements.txt; do \
 			echo \">>> \$$req\"; \
 			pip-audit -r \"\$$req\" --strict $(IGNORE_VULN_FLAGS) || status=1; \
 		done; \
@@ -434,7 +468,7 @@ docker-validate:
 ## (Phase 7) builds its own npm dependencies inside its own Dockerfile stage,
 ## independent of dashboard-install's cached volume.
 docker-build:
-	$(COMPOSE) build order-service inventory-service fulfillment-orchestrator api-gateway spark-gold ops-dashboard
+	$(COMPOSE) build order-service inventory-service fulfillment-orchestrator api-gateway spark-gold ops-dashboard failure-lab
 
 ## Run pre-commit against every tracked file, not just staged ones — this is
 ## the "does the whole tree pass" check, distinct from the git-hook install

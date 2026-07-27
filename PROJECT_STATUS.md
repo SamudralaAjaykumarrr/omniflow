@@ -1,11 +1,18 @@
 # Project Status
 
-Last updated: 2026-07-26 (Phase 7, Ops dashboard, complete and verified —
-see notes below).
+Last updated: 2026-07-26 (Phase 8, Failure laboratory, complete and
+verified — see notes below).
 
 ## Current phase
 
-**Phase 7 (Ops dashboard) complete and verified.** React + TypeScript
+**Phase 8 (Failure laboratory) complete and verified.** Ten deterministic
+failure scenarios, each triggerable through a real backend API
+(`services/failure-lab`, a new service) and exercised against the real
+running stack — no scenario is a UI-only simulation. Replaces the Phase 7
+inert preview screen with a working control panel. Full detail:
+`docs/phase-8-failure-laboratory.md`.
+
+Phase 7 (Ops dashboard) complete and verified. React + TypeScript
 single-page app (`services/ops-dashboard`), 10 screens, served by nginx as
 a new `ops-dashboard` Compose service. Full detail:
 `docs/phase-7-ops-dashboard.md`.
@@ -62,7 +69,7 @@ targets, 91 new tests, and an end-to-end local smoke test
 | 5. Data quality | **Done** | Executable checks + report — folded into Phase 4 (`app.dq`), see below |
 | 6. Demand forecasting | **Done** | Synthetic data, seasonal-naive baseline, `HistGradientBoostingRegressor` secondary model, chronological evaluation, champion selection, future forecasts — see below and `TEST_RESULTS.md` |
 | 7. Ops dashboard | **Done** | React + TypeScript, 10 screens, nginx reverse proxy, no backend changes — see below and `docs/phase-7-ops-dashboard.md` |
-| 8. Failure laboratory | Not started | 10 deterministic failure scenarios |
+| 8. Failure laboratory | **Done** | 10 deterministic failure scenarios, new `failure-lab` service, dashboard control panel — see below and `docs/phase-8-failure-laboratory.md` |
 | 9. Security hardening | Partially pulled forward | Dependency/SAST scanning (bandit + pip-audit) done — see `docs/phase-5-engineering-quality.md`; JWT/RBAC finalization, audit events still not started |
 | 10. Testing completion + load test | Partially pulled forward | Coverage threshold (65%, measured 71.6%) + `coverage.xml` done — see `docs/phase-5-engineering-quality.md`; load test tooling still not started |
 | 11. AWS infrastructure (Terraform) | Not started | Authored + validated, never applied |
@@ -381,6 +388,68 @@ restated at the top of each phase's own PR/commit as it lands.
     schema in Phases 1-6 is untouched; only `docker-compose.yml`,
     `Makefile`, `.github/workflows/ci.yml`, and the new root
     `.dockerignore` were touched outside `services/ops-dashboard/`
+- **Phase 8 application code** (see `docs/phase-8-failure-laboratory.md`
+  for full detail):
+  - `services/failure-lab` — **new service**: FastAPI catalog/trigger/reset
+    API (`GET /scenarios`, `POST /scenarios/{id}/trigger`, `GET /scenarios/
+    {id}/runs/{run_id}`, `POST /scenarios/{id}/reset`), a background-thread
+    runner (`app/runner.py`) with its own Postgres database
+    (`omniflow_failure_lab`, `scenario_runs`/`scenario_resets`/
+    `failure_lab_dead_letters`), and the 10 deterministic failure scenarios
+    (`app/scenarios/`) — the exact catalog `services/ops-dashboard/src/api/
+    mock/failureLab.ts` had already documented as the Phase 8 plan:
+    payment-decline, payment-timeout, inventory-oversell-race,
+    duplicate-order-submit, duplicate-event-delivery, poison-message-dlq,
+    malformed-kafka-record, late-event-arrival, saga-crash-resume,
+    downstream-outage. A dedicated worker (`app/poison_consumer.py`,
+    docker-compose service `failure-lab-poison-consumer`) backs the
+    poison-message scenario on its own chaos topic (`failure-lab.poison`,
+    added to `infra/docker/redpanda/create-topics.sh`, not part of the
+    11-topic domain event catalog).
+  - Small, internal-only additions to existing services: order-service
+    gained `GET /internal/failure-lab/processed-events/{event_id}`;
+    inventory-service gained `app/outage.py` + `SimulatedOutageMiddleware`
+    (`POST/GET /internal/failure-lab/outage/*`); fulfillment-orchestrator
+    gained `POST /dead-letters/{id}/replay` (dead-letter replay over HTTP,
+    not just the CLI) and `POST /internal/failure-lab/saga-crash-resume/
+    {order_id}/resume`, plus a `CRASH_SIMULATION_SKU` marker in `app/
+    saga.py`'s `advance_saga`.
+  - **Four real bugs found and fixed** running this phase's scenarios and
+    smoke test against a genuinely live stack (all documented in `RISKS.md`,
+    status `Closed`): (1) `event_contracts.kafka.run_consume_loop` crashed
+    any consumer forever on one malformed Kafka record (found via stale
+    Phase 6 generator test data still sitting in a real topic); (2)
+    `resume_incomplete_sagas` let one orphaned saga crash the whole
+    orchestrator at every startup; (3) a transient failure on a saga's
+    first `advance_saga` call left it stuck forever, invisible to both
+    Kafka retry and the dead-letter path; (4) `app.replay.replay_one` had
+    never actually worked against a real dead letter (`payload["original_
+    event"]` vs. the real flat-envelope shape) — masked until now because
+    every existing test built its own (wrongly-shaped) fixture instead of
+    reusing the real code path.
+  - `services/ops-dashboard` — `src/pages/FailureLabPage.tsx` rewritten to
+    fetch the real catalog and trigger/reset scenarios (`src/api/
+    failureLab.ts`, new); `src/api/mock/failureLab.ts` (the Phase 7 inert
+    preview) deleted; `StatusBadge`'s tone mapping extended for
+    `PASSED`/`RECOVERED`/`ERROR`.
+  - `docker-compose.yml` — `failure-lab` (port `8004`) and
+    `failure-lab-poison-consumer` services added; `infra/docker/postgres/
+    init-databases.sql` gained `omniflow_failure_lab`(`_test`).
+  - `Makefile` — `test-failure-lab`, `phase8-smoke`, `phase8-validate`,
+    `clean-phase8` targets added; `test`/`typecheck`/`security`/
+    `docker-build` extended to include `services/failure-lab`.
+  - `scripts/phase8_smoke_test.sh` — **new**: triggers all 10 scenarios
+    against the real running stack, asserts each reaches `PASSED`/
+    `RECOVERED`, resets every scenario, then reruns all 10 a second time
+    (proves safe-to-rerun for the whole catalog against a live stack, not
+    just asserted in a test).
+  - 359 passing backend tests across seven suites (event-contracts,
+    order-service, inventory-service, fulfillment-orchestrator,
+    api-gateway, data-platform, **failure-lab**) — see `TEST_RESULTS.md`
+    for the full breakdown; 66 passing dashboard tests (was 50) — including
+    a new working Replay button on the Dead Letter Queue screen (backed by
+    the same `POST /dead-letters/{id}/replay` endpoint, closing a Phase 7
+    "CLI-only" limitation).
 
 ## Environment notes (relevant to every future phase)
 
@@ -399,12 +468,13 @@ individual queries outright, not just slowed them down.
 
 ## Next action
 
-Begin Phase 8: Failure laboratory (10 deterministic failure scenarios).
-Phase 7 (Ops dashboard) is now done (this document's separate note above);
-its Failure Laboratory screen is a clearly-labeled inert preview of the
-planned scenario catalog, ready to be wired to Phase 8's real backend once
-it exists. Phase 5 (Data quality) is done, folded into Phase 4; Phase 6
-(Demand forecasting) is done. Engineering-quality tooling is also done for
+Phase 8 (Failure laboratory) is now done — see this document's separate
+note above and `docs/phase-8-failure-laboratory.md`. Next: Phase 11 (AWS
+infrastructure, Terraform-only per ADR 0007), Phase 13 (final
+documentation/career deliverables), and the remaining scope of Phases 9/10/
+12 (JWT/RBAC, load testing, an actual GitHub-hosted CI run). Phase 5 (Data
+quality) is done, folded into Phase 4; Phase 6 (Demand forecasting) is
+done; Phase 7 (Ops dashboard) is done. Engineering-quality tooling is also done for
 the slice it covers; JWT/RBAC (rest of Phase 9), load-test tooling (rest of
 Phase 10), an actual GitHub-hosted CI run (rest of Phase 12), and Terraform
 (Phase 11) remain untouched.

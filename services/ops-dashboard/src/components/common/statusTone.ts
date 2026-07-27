@@ -1,6 +1,17 @@
 export type StatusTone = "good" | "warning" | "serious" | "critical" | "neutral";
 
-const GOOD = new Set(["SHIPPED", "COMPLETED", "PASS", "ok", "ready", "true", "ACTIVE"]);
+const GOOD = new Set([
+  "SHIPPED",
+  "COMPLETED",
+  "PASS",
+  "ok",
+  "ready",
+  "true",
+  "ACTIVE",
+  // Phase 8 failure-lab scenario run statuses (services/failure-lab/app/models.py).
+  "PASSED",
+  "RECOVERED",
+]);
 const WARNING = new Set([
   "CREATED",
   "VALIDATED",
@@ -10,7 +21,7 @@ const WARNING = new Set([
   "PROCESSING",
   "RUNNING",
 ]);
-const CRITICAL = new Set(["FAILED", "FAIL", "not_ready", "error", "CANCELLED"]);
+const CRITICAL = new Set(["FAILED", "FAIL", "not_ready", "error", "CANCELLED", "ERROR"]);
 
 /** Maps the many status-ish strings across this app (order/saga/health/DQ) to one of the four reserved status colors, never a categorical hue. */
 export function statusTone(status: string): StatusTone {

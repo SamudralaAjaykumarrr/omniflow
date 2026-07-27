@@ -14,6 +14,7 @@ event), and increments retry/dead-letter Prometheus counters.
 
 from __future__ import annotations
 
+import logging
 import random
 import time
 from collections.abc import Callable, Iterable
@@ -23,10 +24,15 @@ from opentelemetry import trace
 
 from event_contracts.envelope import EventEnvelope
 from event_contracts.logging_setup import correlation_id_var
-from event_contracts.metrics_setup import KAFKA_CONSUMER_RETRY_TOTAL, KAFKA_DEAD_LETTER_TOTAL
+from event_contracts.metrics_setup import (
+    KAFKA_CONSUMER_RETRY_TOTAL,
+    KAFKA_DEAD_LETTER_TOTAL,
+    KAFKA_MALFORMED_RECORD_TOTAL,
+)
 from event_contracts.tracing_setup import context_from_traceparent
 
 _tracer = trace.get_tracer(__name__)
+_logger = logging.getLogger(__name__)
 
 
 class KafkaPublishError(Exception):
@@ -129,6 +135,20 @@ def run_consume_loop(
     `on_dead_letter(envelope, error, attempt_count)` — the caller's job to
     persist the failure and publish it to `deadletter.event` — and moves on.
 
+    A record that isn't even valid-envelope-shaped JSON (`parse_envelope`
+    itself raising) is a distinct failure mode from a *business-logic*
+    failure inside `process()`: there is no valid `EventEnvelope` to hand to
+    `on_dead_letter`, retrying parsing again would never succeed (the bytes
+    are what they are), and every caller of this loop only ever provisioned
+    one Kafka consumer group per process — blocking on it would starve
+    every other message behind it forever. So this is logged + counted
+    (`KAFKA_MALFORMED_RECORD_TOTAL`) and the offset is committed
+    immediately, never retried and never crashing the consumer process.
+    Found for real during Phase 8 validation: a message the Phase 6
+    synthetic generator's `--malformed-rate` had left sitting in a real
+    topic crashed the process on every restart until this existed (see
+    RISKS.md).
+
     The offset is committed after successful processing OR after DLQ
     routing, **never before either** — that ordering is what makes "a
     poison message doesn't block the partition forever, but also doesn't
@@ -146,7 +166,20 @@ def run_consume_loop(
         if msg.error():
             continue  # transient broker-level poll error; retried on next poll
 
-        envelope = parse_envelope(msg)
+        try:
+            envelope = parse_envelope(msg)
+        except Exception as exc:  # noqa: BLE001 - any parse failure is equally unrecoverable
+            _logger.error(
+                "skipping unparseable Kafka record on %s (partition %s, offset %s): %s",
+                msg.topic(),
+                msg.partition(),
+                msg.offset(),
+                exc,
+            )
+            KAFKA_MALFORMED_RECORD_TOTAL.labels(msg.topic()).inc()
+            consumer.commit(msg)
+            continue
+
         correlation_token = correlation_id_var.set(envelope.correlation_id)
         try:
             span_context = context_from_traceparent(envelope.trace_context.traceparent)

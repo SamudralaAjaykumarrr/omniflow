@@ -11,6 +11,7 @@ const GATEWAY_TARGET = process.env.VITE_DEV_GATEWAY_TARGET ?? "http://localhost:
 const INVENTORY_TARGET = process.env.VITE_DEV_INVENTORY_TARGET ?? "http://localhost:8002";
 const ORCHESTRATOR_TARGET = process.env.VITE_DEV_ORCHESTRATOR_TARGET ?? "http://localhost:8003";
 const PROMETHEUS_TARGET = process.env.VITE_DEV_PROMETHEUS_TARGET ?? "http://localhost:9090";
+const FAILURE_LAB_TARGET = process.env.VITE_DEV_FAILURE_LAB_TARGET ?? "http://localhost:8004";
 
 export default defineConfig({
   plugins: [react()],
@@ -33,6 +34,11 @@ export default defineConfig({
         target: PROMETHEUS_TARGET,
         changeOrigin: true,
         rewrite: (p) => p.replace(/^\/prom-api/, ""),
+      },
+      "/failure-lab-api": {
+        target: FAILURE_LAB_TARGET,
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/failure-lab-api/, ""),
       },
     },
   },

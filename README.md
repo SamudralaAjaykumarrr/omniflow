@@ -12,21 +12,22 @@ retailer.
 
 ## Current implementation status
 
-**Phases 1-7 of 13 are done and verified** (Phase 5, Data quality, is also
-done — folded into Phase 4). **Phases 8, 11, 13 have not been started**;
+**Phases 1-8 of 13 are done and verified** (Phase 5, Data quality, is also
+done — folded into Phase 4). **Phases 11, 13 have not been started**;
 parts of 9, 10, and 12 have been pulled forward as a separate engineering-
 quality pass, and the Phase 4 streaming data platform has had a hardening
 pass on top (see below).
 
 | Done now | Not started yet |
 |---|---|
-| Core domain (orders, inventory, API gateway) | Failure laboratory |
-| Event platform (Redpanda, saga orchestrator, DLQ, replay) | JWT/RBAC, load testing, Terraform, career docs |
-| Observability (structured logs, tracing, metrics, Grafana) | An actual GitHub-hosted CI run (workflow authored + verified locally only) |
+| Core domain (orders, inventory, API gateway) | JWT/RBAC, load testing, Terraform, career docs |
+| Event platform (Redpanda, saga orchestrator, DLQ, replay) | An actual GitHub-hosted CI run (workflow authored + verified locally only) |
+| Observability (structured logs, tracing, metrics, Grafana) | |
 | Data platform (Spark Bronze/Silver/Gold, data quality, backfill, malformed-event quarantine, Spark job metrics) | |
 | Demand forecasting (synthetic history, seasonal-naive baseline, `HistGradientBoostingRegressor` secondary model, chronological evaluation, champion selection, future forecasts) | |
 | Measured coverage threshold, security scanning, pre-commit, CI (`docs/phase-5-engineering-quality.md`) | |
 | Ops dashboard (React/TypeScript, 10 screens, `docs/phase-7-ops-dashboard.md`) | |
+| Failure laboratory (10 deterministic failure scenarios, `docs/phase-8-failure-laboratory.md`) | |
 
 Data quality (checks + report) was originally scoped as its own phase but was
 folded into Phase 4, since the Spark plumbing it depends on was already in
@@ -45,9 +46,10 @@ Every number below comes from a command actually run against this repo (see
 `TEST_RESULTS.md`; nothing here is estimated) or from a real
 `docker compose up` verified in `PROJECT_STATUS.md`:
 
-- **272 tests passing, 0 failing** across six suites (event-contracts,
+- **359 tests passing, 0 failing** across seven suites (event-contracts,
   order-service, inventory-service, fulfillment-orchestrator, api-gateway,
-  data-platform — including 91 new forecasting tests)
+  data-platform, **failure-lab** — including 91 forecasting tests and 66
+  new Phase 8 failure-lab tests)
 - **23 containers** (full app stack + Redpanda + MinIO + Spark + observability
   stack) running concurrently on one host without OOM
 - **11 event types** in the event catalog, each with a schema and a consumer
@@ -63,15 +65,23 @@ Every number below comes from a command actually run against this repo (see
   WAPE 0.154) genuinely beat the seasonal-naive baseline (WAPE 0.298) and
   was selected champion by a documented rule using the measured numbers —
   full detail: `docs/phase-6-demand-forecasting.md`
-- **73.4% measured combined test coverage** across all six Python suites, a
-  65% threshold enforced by `make coverage` and `coverage.xml` generated at
-  the repo root; `make security` (bandit + pip-audit) runs clean, with every
-  accepted CVE individually justified in `RISKS.md` #20 — full detail:
-  `docs/phase-5-engineering-quality.md`
-- **50 passing dashboard tests** (Vitest + React Testing Library, 14 files)
-  for the new `services/ops-dashboard` React/TypeScript app, plus a clean
+- **80.3% measured combined test coverage** across all seven Python suites,
+  a 65% threshold enforced by `make coverage` and `coverage.xml` generated
+  at the repo root; `make security` (bandit + pip-audit) runs clean, with
+  every accepted CVE individually justified in `RISKS.md` #20 — full
+  detail: `docs/phase-5-engineering-quality.md`
+- **66 passing dashboard tests** (Vitest + React Testing Library, 16 files)
+  for the `services/ops-dashboard` React/TypeScript app, plus a clean
   `eslint`/`prettier --check`/`tsc --noEmit`/`vite build` — full detail:
-  `docs/phase-7-ops-dashboard.md`
+  `docs/phase-7-ops-dashboard.md`, `docs/phase-8-failure-laboratory.md`
+- **Failure laboratory: 10 deterministic failure scenarios, each triggered
+  through a real backend API** (`services/failure-lab`) and verified twice
+  in a row against the real running stack (`make phase8-smoke`) — saga
+  compensation, retry/backoff, row-level-lock concurrency, idempotency
+  (both request- and event-level), dead-letter routing, Bronze/Silver data
+  quality, and saga crash-resume are each demonstrated for real, not
+  simulated in the browser — full detail:
+  `docs/phase-8-failure-laboratory.md`
 
 ## Verified engineering highlights
 
@@ -88,11 +98,13 @@ Every number below comes from a command actually run against this repo (see
 - **Tracing that survives the Kafka boundary**: one Jaeger trace, manually
   inspected, covers a single order across the gateway, order service, and
   orchestrator's async saga steps.
-- **Twelve real bugs found and fixed by actually running the system** (Spark
+- **Sixteen real bugs found and fixed by actually running the system** (Spark
   scheduler starvation, MinIO's bulk-delete rejection, a Structured Streaming
   metadata-visibility gap, a dedup watermark declared on the wrong timestamp
   column silently dropping valid rows, a recursive-forecast row-ordering bug
-  caught by a regression test before it ever shipped, and more) — full
+  caught by a regression test before it ever shipped, a malformed Kafka
+  record that could crash any consumer forever, a saga-resume startup crash,
+  a dead-letter replay tool that had never actually worked, and more) — full
   writeups in `DECISIONS.md`.
 
 ## Architecture overview
@@ -170,12 +182,12 @@ and Prometheus — no CORS changes needed on any backend, and no backend
 code changed at all. Ten screens: Overview, Orders (create/cancel/track,
 status-history timeline), Inventory & Fulfillment Nodes, Saga Monitor, Dead
 Letter Queue, Observability (live Prometheus queries), Data Quality, Data
-Platform, Demand Forecasting, and a Failure Laboratory preview (Phase 8
-isn't built yet, so this one's inert and clearly labeled). Six of the ten
-screens are fully live against real running services; the other four mix
-real measured numbers with clearly-labeled local fallback data where no
-read API exists yet (documented per-screen in
-`docs/phase-7-ops-dashboard.md`). 50 passing tests (Vitest + React Testing
+Platform, Demand Forecasting, and Failure Laboratory (Phase 8 — 10
+deterministic failure scenarios, triggered and reset through a real
+backend). Seven of the ten screens are fully live against real running
+services; the other three mix real measured numbers with clearly-labeled
+local fallback data where no read API exists yet (documented per-screen in
+`docs/phase-7-ops-dashboard.md`). 66 passing tests (Vitest + React Testing
 Library).
 
 ## Observability
@@ -196,13 +208,14 @@ a container.
 
 | Suite | Passed | Failed |
 |---|---|---|
-| event-contracts | 37 | 0 |
-| order-service | 34 | 0 |
-| inventory-service | 18 | 0 |
-| fulfillment-orchestrator | 29 | 0 |
+| event-contracts | 38 | 0 |
+| order-service | 37 | 0 |
+| inventory-service | 23 | 0 |
+| fulfillment-orchestrator | 41 | 0 |
 | api-gateway | 9 | 0 |
 | data-platform | 145 | 0 |
-| **Total** | **272** | **0** |
+| failure-lab | 66 | 0 |
+| **Total** | **359** | **0** |
 
 data-platform's 145 includes 91 forecasting tests (`tests/forecasting/`) —
 unit tests for synthetic-data determinism, feature/leakage correctness,
@@ -213,17 +226,19 @@ preparation and a full end-to-end CLI run.
 Also verified against a real, freshly-started `docker compose up`: the full
 order lifecycle end to end (including the payment-decline/compensation
 path), traces landing in Jaeger, all Prometheus scrape targets up with real
-samples, the Grafana dashboard provisioned, and (Phase 4) real Bronze/
-Silver/Gold Parquet plus a passing data-quality report. `mypy` passes clean
-across all six packages; `ruff check`/`ruff format --check` pass clean. Full
-detail, including every bug found and fixed while producing these numbers:
+samples, the Grafana dashboard provisioned, (Phase 4) real Bronze/
+Silver/Gold Parquet plus a passing data-quality report, and (Phase 8) all
+10 failure-lab scenarios reaching PASSED/RECOVERED twice in a row against
+the live stack (`make phase8-smoke`). `mypy` passes clean across all seven
+packages; `ruff check`/`ruff format --check` pass clean. Full detail,
+including every bug found and fixed while producing these numbers:
 `TEST_RESULTS.md`.
 
-**Engineering quality** (`make ci`, exit 0): combined coverage 73.4%
+**Engineering quality** (`make ci`, exit 0): combined coverage 80.3%
 (threshold 65%, `coverage.xml` generated), `bandit` 0 medium/high,
 `pip-audit` clean after fixing 5 CVEs outright and individually accepting 9
 with a written, verified reason each (`RISKS.md` #20), `docker compose
-config` valid, all five application images build. Full detail:
+config` valid, all six application images build. Full detail:
 `docs/phase-5-engineering-quality.md`.
 
 ## Quick-start instructions
@@ -239,7 +254,7 @@ make demo        # docker compose up --build, then prints the service URLs
 Other useful targets:
 
 ```bash
-make test         # all six service test suites, each against its own *_test database
+make test         # all seven service test suites, each against its own *_test database
 make typecheck    # mypy, per service
 make lint         # ruff check
 make format       # ruff format
@@ -254,15 +269,18 @@ make inspect-bronze / inspect-silver / inspect-gold / inspect-bronze-rejects / i
 make forecast-run     # full demand-forecasting pipeline: generate -> prepare -> train both models -> evaluate -> select -> forecast
 make forecast-smoke   # end-to-end forecasting smoke test, entirely local (no live MinIO/Kafka needed)
 make forecast-inspect ARGS="forecast"  # inspect forecast output / metrics / selection / dataset
+make test-failure-lab # the failure-lab service's own unit/API test suite
+make phase8-smoke     # trigger all 10 failure-lab scenarios against the live stack, twice
+make replay ARGS="--all"  # replay unreplayed dead letters (CLI, also a dashboard button since Phase 8)
 make reset        # tear down containers and volumes for a clean slate
 make logs         # tail all service logs
 
 make setup-dev    # build the shared devtools image (once, or after editing it)
-make coverage     # all six suites w/ coverage, combined coverage.xml, threshold-enforced
+make coverage     # all seven suites w/ coverage, combined coverage.xml, threshold-enforced
 make security     # bandit (SAST) + pip-audit (dependency CVEs)
 make pre-commit   # pre-commit hooks against the whole tree
 make docker-validate  # docker compose config
-make docker-build     # build all six application images (incl. ops-dashboard)
+make docker-build     # build all six application images (incl. ops-dashboard, failure-lab)
 make ci           # the full local gate: format-check, lint, typecheck, coverage, security, dashboard, docker
 
 make dashboard-install / dashboard-lint / dashboard-format / dashboard-format-check
@@ -296,6 +314,7 @@ Available once `make demo` reports all services healthy:
 | Grafana (dashboards, anonymous admin access) | http://localhost:3000 |
 | MinIO Console (bronze/silver/gold browser) | http://localhost:9001 |
 | Ops Dashboard | http://localhost:3001 |
+| Failure Laboratory API (direct) | http://localhost:8004/docs |
 
 ## Repository structure
 
@@ -308,12 +327,14 @@ services/
   event-contracts/         Shared Kafka helpers, schemas, logging/tracing/metrics setup
   data-platform/            Spark Bronze/Silver/Gold, DQ, generator, backfill, forecasting
   ops-dashboard/            React + TypeScript ops dashboard, nginx reverse proxy (Phase 7)
+  failure-lab/              10 deterministic failure scenarios, trigger/reset API (Phase 8)
 infra/docker/               Compose service configs (Grafana, Prometheus, MinIO, Redpanda, OTel,
                              devtools — the shared ruff/mypy/pytest/bandit/pip-audit/pre-commit image)
 .github/workflows/           ci.yml — GitHub Actions, mirrors `make ci`
 docs/                       Architecture, event catalog, data model, data pipeline, ADRs,
-                             phase-5-engineering-quality.md, phase-7-ops-dashboard.md
-scripts/                    compose_smoke_test.sh (make smoke)
+                             phase-5-engineering-quality.md, phase-7-ops-dashboard.md,
+                             phase-8-failure-laboratory.md
+scripts/                    compose_smoke_test.sh (make smoke), phase8_smoke_test.sh (make phase8-smoke)
 docker-compose.yml, Makefile, .env.example, .pre-commit-config.yaml, .dockerignore
 PROJECT_STATUS.md, RISKS.md, DECISIONS.md, TEST_RESULTS.md
 ```
@@ -367,11 +388,17 @@ Full index of all 10 ADRs: `docs/adrs/README.md`.
   'Limitations').
 - **Ops dashboard is unauthenticated** (no JWT/RBAC backend exists yet —
   Phase 9 remainder), **order listing is client-curated, not server-listed**
-  (Order Service has no list-all endpoint), **DLQ replay is shown as a CLI
-  command, not a working button**, and three of the ten screens (Data
-  Quality, Data Platform, part of Demand Forecasting) show clearly-labeled
-  local mock data pending a real MinIO read API. All named, not glossed
-  over, in `docs/phase-7-ops-dashboard.md` 'Limitations'.
+  (Order Service has no list-all endpoint), and three of the ten screens
+  (Data Quality, Data Platform, part of Demand Forecasting) show
+  clearly-labeled local mock data pending a real MinIO read API. All named,
+  not glossed over, in `docs/phase-7-ops-dashboard.md` 'Limitations'. (DLQ
+  replay is a working button as of Phase 8 — see below.)
+- **Failure lab's downstream-outage scenario simulates the outage
+  in-process rather than actually stopping the container** (a real
+  `docker compose stop` would affect every concurrent user of a shared dev
+  environment) — the gateway's `/readyz` and the resulting dead-letter are
+  still genuinely observed, not mocked (`RISKS.md` #32,
+  `docs/phase-8-failure-laboratory.md`).
 
 Full risk register, with status and mitigation for each: `RISKS.md`.
 

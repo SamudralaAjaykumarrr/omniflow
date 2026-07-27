@@ -127,6 +127,50 @@ export interface DeadLetterEvent {
   replayed_at: string | null;
 }
 
+/**
+ * Phase 8 (Failure laboratory) — mirrors
+ * services/failure-lab/app/schemas.py exactly.
+ */
+export type ScenarioRunStatus = "RUNNING" | "PASSED" | "RECOVERED" | "FAILED" | "ERROR";
+
+export interface FailureScenarioCatalogEntry {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  mechanism_reference: string;
+  expected_failure_behavior: string;
+  expected_recovery_behavior: string;
+  safe_to_rerun: boolean;
+}
+
+export interface ScenarioRun {
+  id: string;
+  scenario_id: string;
+  run_number: number;
+  status: ScenarioRunStatus;
+  correlation_id: string;
+  summary: string | null;
+  diagnostics: Record<string, unknown>;
+  resources: Record<string, unknown>;
+  error_message: string | null;
+  started_at: string;
+  completed_at: string | null;
+}
+
+export interface ScenarioResetResult {
+  scenario_id: string;
+  summary: string;
+  reset_at: string;
+}
+
+export interface ScenarioDetail {
+  catalog: FailureScenarioCatalogEntry;
+  latest_run: ScenarioRun | null;
+  last_reset: ScenarioResetResult | null;
+  run_count: number;
+}
+
 export interface ApiErrorBody {
   error_code?: string;
   message?: string;

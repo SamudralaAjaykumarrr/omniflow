@@ -3,18 +3,46 @@ import uuid
 from event_contracts import EventEnvelope, EventType
 from event_contracts.kafka import run_consume_loop
 from event_contracts.logging_setup import correlation_id_var
-from event_contracts.metrics_setup import KAFKA_CONSUMER_RETRY_TOTAL, KAFKA_DEAD_LETTER_TOTAL
+from event_contracts.metrics_setup import (
+    KAFKA_CONSUMER_RETRY_TOTAL,
+    KAFKA_DEAD_LETTER_TOTAL,
+    KAFKA_MALFORMED_RECORD_TOTAL,
+)
 
 
 class FakeMessage:
-    def __init__(self, envelope: EventEnvelope) -> None:
+    def __init__(
+        self,
+        envelope: EventEnvelope | None = None,
+        *,
+        raw_value: bytes | None = None,
+        topic: str = "order.created",
+        partition: int = 0,
+        offset: int = 0,
+    ) -> None:
         self._envelope = envelope
+        self._raw_value = raw_value
+        self._topic = topic
+        self._partition = partition
+        self._offset = offset
 
     def error(self):
         return None
 
     def value(self) -> bytes:
+        if self._raw_value is not None:
+            return self._raw_value
+        assert self._envelope is not None
         return self._envelope.model_dump_json().encode("utf-8")
+
+    def topic(self) -> str:
+        return self._topic
+
+    def partition(self) -> int:
+        return self._partition
+
+    def offset(self) -> int:
+        return self._offset
 
 
 class FakeConsumer:
@@ -172,6 +200,40 @@ def test_retry_and_dead_letter_counters_increment():
 
     assert after_retry == before_retry + 2  # 3 attempts = 2 retries before giving up
     assert after_dlq == before_dlq + 1
+
+
+def test_unparseable_record_is_skipped_committed_and_counted_not_crashed():
+    """Regression test for a real bug found during Phase 8 validation: a
+    record that isn't even valid-envelope-shaped JSON (e.g. one the Phase 6
+    synthetic generator's `--malformed-rate` had left sitting in a real
+    topic) used to propagate out of `parse_envelope` completely unhandled —
+    outside the try/except that exists for `process()` failures — crashing
+    the whole consumer process on every restart, forever, since the
+    poisoned offset was never committed. It must instead be logged,
+    counted, and skipped, exactly like a poison message `process()` itself
+    rejects."""
+    malformed = FakeMessage(
+        raw_value=b"{not-valid-json::: definitely broken", topic="order.created"
+    )
+    consumer = FakeConsumer([malformed])
+    processed = []
+    dead_lettered = []
+
+    before = KAFKA_MALFORMED_RECORD_TOTAL.labels("order.created")._value.get()
+
+    run_consume_loop(
+        consumer,
+        lambda e: processed.append(e),
+        on_dead_letter=lambda e, err, n: dead_lettered.append(e),
+        running=lambda: len(consumer.committed) == 0,
+    )
+
+    after = KAFKA_MALFORMED_RECORD_TOTAL.labels("order.created")._value.get()
+
+    assert processed == []  # never reached process() — there was no valid envelope
+    assert dead_lettered == []  # not routed through the business-logic DLQ path either
+    assert len(consumer.committed) == 1  # still committed — never blocks the partition
+    assert after == before + 1
 
 
 def test_idle_poll_returning_none_does_not_call_process_or_commit():

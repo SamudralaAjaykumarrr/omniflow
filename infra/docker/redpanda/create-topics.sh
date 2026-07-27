@@ -16,6 +16,10 @@ TOPICS=(
   "order.failed"
   "inventory.low"
   "deadletter.event"
+  # Not part of the domain event catalog above — owned entirely by the
+  # Phase 8 failure lab's poison-message-dlq scenario (services/failure-lab/
+  # app/kafka_topics.py). No real business consumer subscribes to it.
+  "failure-lab.poison"
 )
 
 existing_topics() {

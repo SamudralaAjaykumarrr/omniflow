@@ -13,9 +13,10 @@ os.environ.setdefault("ORCHESTRATOR_PAYMENT_RETRY_BASE_DELAY_SECONDS", "0.001")
 os.environ.setdefault("ORCHESTRATOR_PAYMENT_RETRY_MAX_DELAY_SECONDS", "0.01")
 
 import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
-from app.db import Base, get_engine  # noqa: E402
+from app.db import Base, get_db, get_engine  # noqa: E402
 from app.models import DeadLetterEvent, OutboxEvent, ProcessedEvent, SagaInstance  # noqa: E402,F401
 
 
@@ -52,3 +53,16 @@ def db_session(session_factory):
         yield session
     finally:
         session.close()
+
+
+@pytest.fixture
+def client(db_session):
+    from app.main import app
+
+    def _get_db_override():
+        yield db_session
+
+    app.dependency_overrides[get_db] = _get_db_override
+    with TestClient(app) as test_client:
+        yield test_client
+    app.dependency_overrides.clear()

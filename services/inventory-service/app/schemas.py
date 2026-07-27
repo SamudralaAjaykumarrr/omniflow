@@ -94,3 +94,16 @@ class ErrorResponse(BaseModel):
     error_code: str
     message: str
     correlation_id: str | None = None
+
+
+class EnableOutageRequest(BaseModel):
+    """Phase 8 (failure lab) downstream-outage scenario input. `float`
+    (not `int`) so tests can request sub-second durations without waiting
+    a full second for the self-clear to prove itself."""
+
+    duration_seconds: float = Field(gt=0, le=300, default=20.0)
+
+
+class OutageStatus(BaseModel):
+    active: bool
+    until: datetime | None
