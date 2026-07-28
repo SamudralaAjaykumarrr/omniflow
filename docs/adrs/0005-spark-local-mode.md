@@ -23,8 +23,8 @@ Spark cluster is the same code, only the `--master` / cluster config differs.
 ## Consequences
 - Throughput is bounded by one machine — acceptable for a demo-scale event
   generator; not a claim about production throughput. Any load-test numbers
-  reported in `docs/resume-evidence.md` are labeled as local single-node
-  numbers, not extrapolated.
+  reported in `docs/career-deliverables.md`/`TEST_RESULTS.md` are labeled as
+  local single-node numbers, not extrapolated.
 - No cluster-manager operational complexity (no YARN/Kubernetes scheduler to
   configure) for local dev.
 - The cloud deployment story (`infra/terraform`, not applied) documents EMR

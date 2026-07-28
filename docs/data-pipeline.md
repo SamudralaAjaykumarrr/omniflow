@@ -238,7 +238,9 @@ a lightweight pyarrow/s3fs loop, not a Spark job.
 ## Consumer lag and pipeline metrics
 
 Kafka consumer-group lag (per topic/partition) is scraped and exposed as a
-Prometheus metric (`docs/reliability.md`), and also lands in the "Consumer
-processing lag" Gold dataset above so it is visible both operationally
-(Grafana, real-time) and historically (dashboard pipeline-health screen,
-queryable trend).
+Prometheus metric (`app.lag_poller`, scraped per
+`infra/docker/prometheus/prometheus.yml`; see `docs/architecture.md`'s
+"Observability flow" section for the full metrics/tracing path), and also
+lands in the "Consumer processing lag" Gold dataset above so it is visible
+both operationally (Grafana, real-time) and historically (dashboard
+pipeline-health screen, queryable trend).

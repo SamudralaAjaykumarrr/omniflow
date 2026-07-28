@@ -190,6 +190,7 @@ erDiagram
 `orders.id` — but Inventory and Order are separate services/schemas in this
 design, so these are **not** enforced as live SQL foreign keys across service
 boundaries; they are validated by (a) application-level checks at write time
-and (b) the referential-integrity data-quality check in
-`docs/data-pipeline.md` / `docs/testing-strategy.md`, which reconciles Gold
-datasets against expected ID spaces.
+and (b) the referential-integrity data-quality check described in
+`docs/data-pipeline.md`'s "Data-quality checks" section
+(`app.dq.checks`/`app.dq.report`), which reconciles Gold datasets against
+expected ID spaces.

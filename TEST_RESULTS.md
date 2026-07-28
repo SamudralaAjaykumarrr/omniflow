@@ -1330,3 +1330,41 @@ host-owned (not root-owned — `TF_RUN`'s `--user "$(id -u):$(id -g)"` in
 the Makefile), and confirmed already excluded by the pre-existing
 `.gitignore` entries (`.terraform/`, `.terraform.lock.hcl`) — `git status`
 shows nothing untracked to add for either.
+
+### 2026-07-27 — Phase 12: CI/CD (GitHub-hosted run)
+
+**Evidence source**: GitHub's public REST API,
+`GET /repos/SamudralaAjaykumarrr/omniflow/actions/runs`, queried directly
+in this session — exact `run_number`/`head_branch`/`head_sha`/`event`/
+`conclusion` fields read from the real response, not summarized secondhand.
+
+**33 total hosted workflow runs** exist for `.github/workflows/ci.yml`
+(`quality-gate` job) as of this session, spanning every phase back to
+Phase 5, when the workflow was first authored. The most recent runs:
+
+| Run # | Branch | Commit | Event | Conclusion |
+|---|---|---|---|---|
+| 33 | `main` | `e402f379` | push | **success** |
+| 32 | `phase-12-github-hosted-ci` | `375ea9eb` | pull_request | **success** |
+| 31 | `phase-12-github-hosted-ci` | `375ea9eb` | push | **success** |
+| 30 | `phase-12-github-hosted-ci` | `7fdd9ec9` | pull_request | **failure** |
+| 29 | `phase-12-github-hosted-ci` | `7fdd9ec9` | push | **failure** |
+| 28 | `main` | `6d90f739` | push | success |
+
+Runs #29/#30 (commit `7fdd9ec`, "ci: harden GitHub Actions workflow for
+hosted verification") are a real, hosted-only failure — the kind of gap a
+purely local `make ci` run cannot surface, since local runs never exercise
+GitHub's own runner image, `actions/checkout`, or its network path to the
+registries the workflow pulls from. Commit `375ea9e` ("fix: normalize
+TypeScript build metadata files") fixed it: runs #31/#32 both succeeded.
+The merge to `main` (`e402f37`, run #33) is green. Every run back through
+Phase 5–11 (runs #1–#28) also shows `success` on its respective merge to
+`main`, with the same expected pattern of an occasional branch-level
+failure caught and fixed before merge (e.g. runs #10–#13 on the
+`phase-7-ops-dashboard` branch, resolved before that PR's own merge run,
+#14/#15/#16).
+
+**No local regression introduced by this verification pass**: `make ci`
+rerun in full this session — unchanged from Phase 11's baseline (411
+backend tests, 82 dashboard tests, `bandit`/`pip-audit` clean, `coverage.xml`
+combined coverage 80.9%, all application images build).

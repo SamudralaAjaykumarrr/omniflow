@@ -31,8 +31,8 @@ not from an in-memory process that must never crash.
   the same Postgres/Redpanda already in the stack.
 - This does not scale to hundreds of saga types or long-running (hours/days)
   workflows as gracefully as Temporal would — documented explicitly in
-  `docs/reliability.md` and the interview guide as the honest tradeoff and the
-  first thing that would change for genuine enterprise scale.
+  `RISKS.md` #8/#11 and `docs/interview-guide.md` as the honest tradeoff and
+  the first thing that would change for genuine enterprise scale.
 
 ## Alternatives considered
 - **Temporal**: the strongest production answer for durable workflows;

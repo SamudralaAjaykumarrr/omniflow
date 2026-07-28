@@ -129,9 +129,8 @@ resource "aws_s3_bucket_lifecycle_configuration" "data_lake" {
   }
 }
 
-# Deny any request that isn't over TLS — the same "encrypted in transit"
-# requirement CLAUDE.md asks for, expressed as a bucket policy rather than
-# relying on every client to opt in.
+# Deny any request that isn't over TLS — enforces "encrypted in transit"
+# as a bucket policy rather than relying on every client to opt in.
 data "aws_iam_policy_document" "require_tls" {
   statement {
     sid       = "DenyInsecureTransport"

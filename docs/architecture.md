@@ -29,6 +29,8 @@ C4Container
     Container(dq, "Data Quality Runner", "Python + PySpark", "Executable checks, report generation")
     Container(forecast, "Forecasting Job", "Python (scikit-learn/statsmodels)", "Baseline + model, batch")
     Container(dashboard, "Ops Dashboard", "React + TypeScript", "Executive, ops, DQ, forecast, failure-lab UIs")
+    Container(failure_lab, "Failure Laboratory", "FastAPI + background-thread runner", "10 deterministic failure scenarios, own Postgres database")
+    Container(lag_poller, "Lag Poller", "Python, direct Kafka polling", "Gold dataset #10 — consumer-group lag, no Spark")
     Container(otel_collector, "OTel Collector", "OpenTelemetry", "Trace/metric pipeline")
     ContainerDb(prometheus, "Prometheus", "TSDB", "Metrics")
     Container(grafana, "Grafana", "Dashboards")
@@ -38,8 +40,16 @@ C4Container
   Rel(customer, gateway, "HTTPS/JSON")
   Rel(ops, dashboard, "HTTPS")
   Rel(dashboard, gateway, "REST (read/write) + polling", "HTTPS")
+  Rel(dashboard, failure_lab, "trigger/reset scenarios, read runs", "HTTPS")
   Rel(gateway, orders, "REST (internal)")
   Rel(gateway, inventory, "REST (internal, read-only queries)")
+  Rel(failure_lab, gateway, "duplicate-order-submit scenario", "REST, service-account JWT")
+  Rel(failure_lab, orders, "poison-message / late-event / crash-resume scenarios", "REST + Kafka")
+  Rel(failure_lab, inventory, "oversell-race, simulated outage", "REST")
+  Rel(failure_lab, orchestrator, "saga-crash-resume, dead-letter replay", "REST")
+  Rel(failure_lab, postgres, "scenario_runs, scenario_resets, failure_lab_dead_letters", "SQL")
+  Rel(lag_poller, redpanda, "polls committed offsets + watermarks (no consumption)")
+  Rel(lag_poller, minio, "writes consumer_lag Parquet snapshots")
   Rel(orders, postgres, "SQL")
   Rel(inventory, postgres, "SQL")
   Rel(orders, outbox_relay, "writes outbox_events row in same TX", "via postgres")
@@ -77,8 +87,11 @@ volume is too small to evaluate a model meaningfully either way (both
 confirmed before building anything, not assumed). It still reads/writes
 MinIO under the same bucket, in its own `forecasting/` prefix alongside
 `gold/`, not nested inside it. Full detail, including why:
-`docs/phase-6-demand-forecasting.md`. The Ops Dashboard container above
-remains not-yet-built target state.
+`docs/phase-6-demand-forecasting.md`. The Ops Dashboard, Failure Laboratory,
+and Lag Poller containers above were added to this diagram in Phase 13 —
+all three were already real, running services (built in Phases 7, 8, and 4
+respectively) that this diagram had not been updated to include; see
+`RISKS.md` #6.
 
 ## Order sequence (happy path)
 
@@ -182,13 +195,54 @@ A parallel path — a customer cancelling the order while the saga is still
 itself), releases whatever reservations that saga had made, and marks the
 saga `FAILED` without calling Order Service again.
 
+## Failure laboratory: trigger / observe / reset flow
+
+The saga-compensation diagram above is one specific failure/recovery path
+(a payment decline). Phase 8's failure laboratory (`services/failure-lab`)
+generalizes this into 10 deterministic, API-triggered scenarios exercised
+against the real running stack — never simulated only in the browser. This
+diagram shows the shape every scenario shares; each scenario's own
+mechanism differs (see `docs/phase-8-failure-laboratory.md` for all 10).
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Ops as Ops user
+  participant DASH as Ops Dashboard
+  participant FL as Failure Laboratory
+  participant Runner as Background scenario runner
+  participant Target as Real backend(s)<br/>(order/inventory/orchestrator/gateway)
+  participant DB as failure_lab Postgres<br/>(scenario_runs)
+
+  Ops->>DASH: open Failure Laboratory screen
+  DASH->>FL: GET /scenarios
+  FL-->>DASH: catalog of 10 scenarios (ops/admin-gated trigger)
+  Ops->>DASH: trigger a scenario
+  DASH->>FL: POST /scenarios/{id}/trigger (ops/admin JWT required)
+  FL->>DB: insert scenario_runs row (status=RUNNING)
+  FL->>Runner: start scenario in a background thread
+  FL-->>DASH: 202 Accepted (run_id)
+  Runner->>Target: exercise the real fault (e.g. force a payment<br/>decline, race two reservations, inject a malformed record)
+  Target-->>Runner: real observed behavior (compensation,<br/>row-lock rejection, dead letter, retry, ...)
+  Runner->>DB: update scenario_runs (status=PASSED/RECOVERED/FAILED)
+  DASH->>FL: GET /scenarios/{id}/runs/{run_id} (poll)
+  FL-->>DASH: terminal status + evidence (timestamps, IDs touched)
+  Ops->>DASH: reset scenario
+  DASH->>FL: POST /scenarios/{id}/reset (ops/admin JWT required)
+  FL->>DB: insert scenario_resets row
+  FL->>Target: restore state (release reservation, clear outage flag, ...)
+```
+
 ## Event flow (bus-level view)
 
 As built (ADR 0010): only `order.validated` and `order.cancelled` actually
-have a consumer driving behavior (the orchestrator). Every other topic is
-real and published but exists for the data platform and dashboard, which
-land in later phases — `SPARK`/`DASH` below are therefore the intended
-consumers, not yet implemented as of Phase 2.
+have a consumer driving saga behavior (the orchestrator). Every other topic
+is real and published for the data platform and dashboard to consume —
+`SPARK` (Phase 4) and `DASH` (Phase 7, via the orchestrator's read-only
+dead-letter API) are both real, running consumers as of Phase 13, not the
+future work this diagram originally sketched in Phase 2. `POISON` (Phase 8)
+is a separate, dedicated chaos-topic consumer backing the poison-message
+scenario, not part of the 11-topic domain event catalog.
 
 ```mermaid
 flowchart LR
@@ -203,11 +257,13 @@ flowchart LR
     T3[inventory.reserved / inventory.rejected / inventory.low]
     T4[fulfillment.assigned / order.shipped / order.failed]
     DLQ[deadletter.event]
+    POISONT[failure-lab.poison - chaos topic, not domain catalog]
   end
   subgraph Consumers
     ORCHC[Fulfillment Orchestrator consumer<br/>order.validated, order.cancelled only]
     SPARK[Spark Structured Streaming - Phase 4]
     DASH[Dashboard read API - Phase 7]
+    POISON[failure-lab poison consumer - Phase 8]
   end
 
   OS --> T1 --> ORCHC
@@ -218,6 +274,8 @@ flowchart LR
   ORCHC -. poison / retry-exhausted .-> DLQ
   DLQ --> DASH
   SPARK --> DASH
+  POISONT --> POISON
+  POISON -. poison-message scenario .-> DLQ
 ```
 
 ## Data pipeline (bronze → silver → gold)
@@ -292,10 +350,12 @@ flowchart TB
 
 Traces (push) and metrics (pull) travel through separate paths, per
 `services/event-contracts/event_contracts/{tracing,metrics}_setup.py`.
-**Traces**: every FastAPI process and every background worker (both outbox
-relays, the order-service validator consumer, the orchestrator's saga
-consumer) calls `configure_tracing`, which exports OTLP spans to the OTel
-Collector; the collector forwards them to Jaeger's own OTLP receiver. A
+**Traces**: every FastAPI process (including `failure-lab`, added in Phase 8
+on the same shared `event_contracts` wiring) and every background worker
+(both outbox relays, the order-service validator consumer, the
+orchestrator's saga consumer, the failure-lab poison consumer) calls
+`configure_tracing`, which exports OTLP spans to the OTel Collector; the
+collector forwards them to Jaeger's own OTLP receiver. A
 span's context crosses the Kafka boundary through the event envelope's own
 `trace_context.traceparent` field (W3C Trace Context) — captured at
 `stage_event` time, re-extracted by the outbox relay's publish span and

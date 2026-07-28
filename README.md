@@ -1,138 +1,70 @@
 # OmniFlow
 
-An event-driven retail order/inventory/fulfillment platform demonstrating
-production-caliber distributed-systems and data-engineering practice — safe
-concurrency, saga orchestration, a real event bus, and a Bronze/Silver/Gold
-data pipeline — running entirely on a single machine with no paid cloud
-services.
+[![CI](https://github.com/SamudralaAjaykumarrr/omniflow/actions/workflows/ci.yml/badge.svg)](https://github.com/SamudralaAjaykumarrr/omniflow/actions/workflows/ci.yml)
 
-This is an original design. It is not a clone of, and does not use any
-proprietary design, branding, or business information from, any real
-retailer.
+An event-driven retail order/inventory/fulfillment platform demonstrating
+production-oriented distributed-systems and data-engineering practice —
+safe concurrency, saga orchestration, a real event bus, and a
+Bronze/Silver/Gold data pipeline — running entirely on a single machine
+with no paid cloud services.
+
+This is an original design, built solo as a portfolio project. It is not a
+clone of, and does not use any proprietary design, branding, or business
+information from, any real retailer, and it has never been deployed to AWS
+or any other cloud (see "AWS infrastructure" below).
 
 ## Current implementation status
 
-**Phases 1-11 of 13 are done and verified** (Phase 5, Data quality, is also
-done — folded into Phase 4). **Phase 13 has not been started**; part of 12
-has been pulled forward as a separate engineering-quality pass, and the
-Phase 4 streaming data platform has had a hardening pass on top (see below).
+**All 13 roadmap phases are done and verified.** Phase 12's GitHub-hosted
+CI run and Phase 13's documentation/career deliverables — the two items
+that were still open as of Phase 11 — are both now complete; see "GitHub
+Actions CI evidence" below and `PROJECT_STATUS.md` for the full phase-by-
+phase log.
 
-| Done now | Not started yet |
+| Area | Status |
 |---|---|
-| Core domain (orders, inventory, API gateway) | Career docs (Phase 13) |
-| Event platform (Redpanda, saga orchestrator, DLQ, replay) | An actual GitHub-hosted CI run (workflow authored + verified locally only) |
-| Observability (structured logs, tracing, metrics, Grafana) | |
-| Data platform (Spark Bronze/Silver/Gold, data quality, backfill, malformed-event quarantine, Spark job metrics) | |
-| Demand forecasting (synthetic history, seasonal-naive baseline, `HistGradientBoostingRegressor` secondary model, chronological evaluation, champion selection, future forecasts) | |
-| Measured coverage threshold, security scanning, pre-commit, CI (`docs/phase-5-engineering-quality.md`) | |
-| Ops dashboard (React/TypeScript, 10 screens, `docs/phase-7-ops-dashboard.md`) | |
-| Failure laboratory (10 deterministic failure scenarios, `docs/phase-8-failure-laboratory.md`) | |
-| JWT authentication + role-based authorization (`DECISIONS.md` "Phase 9") | |
-| Load testing (k6, 5 profiles, real measured results, `docs/phase-10-load-testing.md`) | |
-| AWS infrastructure (Terraform, authored + validated, never applied, `infra/terraform/README.md`) | |
+| Core domain (orders, inventory, API gateway) | Done |
+| Event platform (Redpanda, saga orchestrator, DLQ, replay) | Done |
+| Observability (structured logs, tracing, metrics, Grafana) | Done |
+| Data platform (Spark Bronze/Silver/Gold, data quality, backfill) | Done |
+| Demand forecasting (baseline + secondary model, measured comparison) | Done |
+| Engineering quality (coverage threshold, security scanning, pre-commit) | Done |
+| Ops dashboard (React/TypeScript, 10 screens) | Done |
+| Failure laboratory (10 deterministic failure scenarios) | Done |
+| JWT authentication + role-based authorization | Done |
+| Load testing (k6, 5 profiles, real measured results) | Done |
+| AWS infrastructure (Terraform, authored + validated, never applied) | Done |
+| GitHub-hosted CI (real hosted run, not just local) | Done |
+| Documentation, portfolio, and career deliverables (this pass) | Done |
 
-Data quality (checks + report) was originally scoped as its own phase but was
-folded into Phase 4, since the Spark plumbing it depends on was already in
-place. The engineering-quality pass reuses the number "Phase 5" in its
-branch name by coincidence — it is not that phase; see
-`docs/phase-5-engineering-quality.md` for the naming note. A separate
-streaming-data-platform hardening pass similarly reused "Phase 6" in its own
-branch name by coincidence — this branch (`phase-6-demand-forecasting`) is
-the table's actual Phase 6; see `docs/phase-6-streaming-data-platform.md`
-for that unrelated hardening pass and `docs/phase-6-demand-forecasting.md`
-for this one. Full phase-by-phase detail: `PROJECT_STATUS.md`.
+Full phase-by-phase build log, including two branches that reused an
+earlier phase number by coincidence (an engineering-quality pass and a
+streaming-data-platform hardening pass — neither is the phase whose number
+their branch name reused): `PROJECT_STATUS.md`.
 
 ## Verified proof points
 
-Every number below comes from a command actually run against this repo (see
-`TEST_RESULTS.md`; nothing here is estimated) or from a real
-`docker compose up` verified in `PROJECT_STATUS.md`:
+Every number below comes from a command actually run against this repo
+(`TEST_RESULTS.md`, `docs/project-evidence.md`) — nothing here is
+estimated.
 
-- **411 tests passing, 0 failing** across seven suites (event-contracts,
+- **411 backend tests passing, 0 failing** across 7 suites (event-contracts,
   order-service, inventory-service, fulfillment-orchestrator, api-gateway,
-  data-platform, failure-lab — including 91 forecasting tests and 52 new
-  Phase 9 JWT/RBAC tests: token creation/validation, the 401-vs-403
-  authorization boundary, and every negative-token case — expired,
-  malformed, missing, wrong-signature, wrong-audience, wrong-issuer,
-  insufficient-role)
-- **23 containers** (full app stack + Redpanda + MinIO + Spark + observability
-  stack) running concurrently on one host without OOM
-- **11 event types** in the event catalog, each with a schema and a consumer
-  idempotency guarantee
-- **10 Gold datasets** (9 Spark streaming aggregations + 1 directly-polled
-  consumer-lag dataset)
-- **Real Kafka → Bronze → Silver → Gold flow verified end-to-end**: synthetic
-  traffic generated onto real topics, real Parquet observed at every layer,
-  a data-quality report run against live MinIO data (overall PASS), and all
-  10 Gold datasets successfully backfilled from real Silver data
-- **Demand forecasting, measured honestly**: on this session's deterministic
-  smoke-test run, the secondary model (`HistGradientBoostingRegressor`,
-  WAPE 0.154) genuinely beat the seasonal-naive baseline (WAPE 0.298) and
-  was selected champion by a documented rule using the measured numbers —
-  full detail: `docs/phase-6-demand-forecasting.md`
-- **80.9% measured combined test coverage** across all seven Python suites,
-  a 65% threshold enforced by `make coverage` and `coverage.xml` generated
-  at the repo root; `make security` (bandit + pip-audit) runs clean, with
-  every accepted CVE individually justified in `RISKS.md` #20 — full
-  detail: `docs/phase-5-engineering-quality.md`
-- **82 passing dashboard tests** (Vitest + React Testing Library, 19 files —
-  up from 66/16, +16 Phase 9 auth-flow tests: login, logout, session
-  restore, route guard, role ranking) for the `services/ops-dashboard`
-  React/TypeScript app, plus a clean `eslint`/`prettier --check`/
-  `tsc --noEmit`/`vite build` — full detail: `docs/phase-7-ops-dashboard.md`,
-  `docs/phase-8-failure-laboratory.md`
-- **Failure laboratory: 10 deterministic failure scenarios, each triggered
-  through a real backend API** (`services/failure-lab`) and verified twice
-  in a row against the real running stack (`make phase8-smoke`) — saga
-  compensation, retry/backoff, row-level-lock concurrency, idempotency
-  (both request- and event-level), dead-letter routing, Bronze/Silver data
-  quality, and saga crash-resume are each demonstrated for real, not
-  simulated in the browser — full detail:
-  `docs/phase-8-failure-laboratory.md`
-- **JWT authentication + role-based authorization (ADR 0009), verified
-  against the real running stack, not just unit tests**: logged in as each
-  of the three seeded roles (`admin`/`ops`/`viewer`) through api-gateway's
-  real `POST /auth/login` (bcrypt-verified against a real Postgres `users`
-  table), confirmed a `viewer` token gets `403` creating an order while an
-  `ops` token reaches the real order-service proxy, confirmed a missing
-  token gets `401`, and confirmed `/healthz`/`/readyz`/`/metrics` stay
-  public throughout — full detail: `DECISIONS.md` "Phase 9".
-- **Load testing (k6), five profiles run for real against the live stack,
-  0% HTTP-level failure rate at every scale tested**: real login through
-  `POST /auth/login`, real order creation/retrieval, real inventory
-  lookups, real concurrent order submissions, and a real end-to-end order →
-  fulfillment-saga workflow polled through the real gateway to `SHIPPED`.
-  `load` (28.70 req/s, 1,520 requests, p95 292.9ms) and `stress` (68
-  combined peak VUs, 2,106 requests, p95 699.0ms) both passed their own
-  declared thresholds with 0% failures; `stress`/`spike` also show honest,
-  real degradation in end-to-end fulfillment completion (75%/50% within a
-  bounded poll timeout) — the real, measured single-instance saga-consumer
-  throughput ceiling, not hidden. Full detail, every threshold, and every
-  real finding: `docs/phase-10-load-testing.md`.
-
-## Verified engineering highlights
-
-- **Idempotent APIs**: every consumer dedupes by `event_id`
-  (`processed_events`); `POST /api/orders` safely retries via an
-  `Idempotency-Key` header — proven with a real duplicate-request test.
-- **Two deliberate concurrency strategies** by contention profile: row-level
-  locking for hot `inventory_stock` rows, optimistic `version` columns for
-  low-contention `orders` ([ADR 0002](docs/adrs/0002-inventory-concurrency-control.md)).
-  Verified live: 10 threads racing for 1 unit of stock, exactly 1 succeeds.
-- **Real saga compensation**: a live compose run forced a payment decline and
-  confirmed the released inventory reservation was actually restored in
-  Postgres, not just marked failed.
-- **Tracing that survives the Kafka boundary**: one Jaeger trace, manually
-  inspected, covers a single order across the gateway, order service, and
-  orchestrator's async saga steps.
-- **Sixteen real bugs found and fixed by actually running the system** (Spark
-  scheduler starvation, MinIO's bulk-delete rejection, a Structured Streaming
-  metadata-visibility gap, a dedup watermark declared on the wrong timestamp
-  column silently dropping valid rows, a recursive-forecast row-ordering bug
-  caught by a regression test before it ever shipped, a malformed Kafka
-  record that could crash any consumer forever, a saga-resume startup crash,
-  a dead-letter replay tool that had never actually worked, and more) — full
-  writeups in `DECISIONS.md`.
+  data-platform, failure-lab).
+- **82 dashboard tests passing, 0 failing** (Vitest + React Testing
+  Library, 19 files).
+- **80.9% combined test coverage** across all 7 Python suites, against a
+  65% enforced threshold.
+- **0% HTTP-level failure rate** across all 5 k6 load-test profiles, up to
+  68 combined peak virtual users.
+- **33 hosted GitHub Actions runs**, including a genuine hosted-only
+  failure caught and fixed, verified against GitHub's public API this
+  session.
+- **`terraform validate`: zero warnings** across all 13 modules + 2
+  environments — authored and validated only, never applied.
+- **23 containers** running concurrently on one 8-CPU/15Gi host without OOM.
+- **10 deterministic failure scenarios**, each triggered through a real
+  backend API and verified twice in a row against the live stack.
 
 ## Architecture overview
 
@@ -145,170 +77,122 @@ Order/Inventory directly over REST for each step
 [ADR 0010](docs/adrs/0010-node-scoring-and-saga-orchestration.md)); a PySpark
 Structured Streaming pipeline turns the same event catalog into
 Bronze/Silver/Gold datasets in MinIO
-([ADR 0005](docs/adrs/0005-spark-local-mode.md)); Jaeger, Prometheus, and
-Grafana make the request/event path observable; a React + TypeScript ops
-dashboard (`services/ops-dashboard`) presents order/inventory/saga/DLQ/
-pipeline-health state to an ops user, reverse-proxied by its own nginx —
-see `docs/phase-7-ops-dashboard.md`. Full container and sequence diagrams:
-`docs/architecture.md`.
+([ADR 0005](docs/adrs/0005-spark-local-mode.md)); a Failure Laboratory
+service exercises 10 deterministic failure scenarios against the real
+stack; Jaeger, Prometheus, and Grafana make the request/event path
+observable; a React + TypeScript ops dashboard presents order/inventory/
+saga/DLQ/pipeline-health state to an authenticated ops user. Full container,
+sequence, failure-recovery, and AWS-mapping diagrams: `docs/architecture.md`;
+external system view: `docs/system-context.md`.
 
-## Implemented capabilities
+## Service & technology map
 
-- Order lifecycle state machine (`CREATED → VALIDATED → INVENTORY_PENDING →
-  INVENTORY_RESERVED → FULFILLMENT_ASSIGNED → PROCESSING → SHIPPED`, plus
-  `CANCELLED`/`FAILED`) with idempotent creation and optimistic-versioned
-  transitions.
-- Row-locked inventory reservation with a stock-check endpoint and
-  fulfillment-node scoring.
-- A custom saga orchestrator: node scoring, deterministic payment simulation,
-  compensation on failure, retry with backoff+jitter, dead-letter routing,
-  and a replay CLI for reprocessing dead letters after a fix.
-- Transactional outbox on every event-producing service, so an event is never
-  published without the state change that caused it having already committed
-  ([ADR 0003](docs/adrs/0003-transactional-outbox.md)).
+| Service | Technology | Responsibility |
+|---|---|---|
+| `api-gateway` | FastAPI, JWT/RBAC | AuthN/Z, rate limiting, request proxy, OpenAPI |
+| `order-service` | FastAPI, SQLAlchemy, Alembic, Postgres | Order state machine, idempotency, outbox |
+| `inventory-service` | FastAPI, SQLAlchemy, Postgres | Stock, reservations, row-level locking |
+| `fulfillment-orchestrator` | Python, Kafka consumer | Saga engine, node scoring, payment sim, DLQ, replay |
+| `event-contracts` | Python (shared package) | Kafka helpers, schemas, logging/tracing/metrics setup |
+| `data-platform` | PySpark, pandas, scikit-learn | Bronze/Silver/Gold pipeline, data quality, forecasting |
+| `ops-dashboard` | React 19, TypeScript, Vite, nginx | Operator UI, 10 screens |
+| `failure-lab` | FastAPI, Postgres | 10 deterministic failure scenarios, trigger/reset API |
+| Redpanda | Kafka-protocol broker | Domain event bus + dead-letter topic |
+| MinIO | S3-compatible object store | Bronze/Silver/Gold Parquet |
+| Jaeger / Prometheus / Grafana | OpenTelemetry / TSDB / dashboards | Distributed tracing, metrics, visualization |
+| Terraform | AWS provider | Authored + validated AWS target, never applied |
 
-## Data platform
+## Major engineering capabilities
+
+- **Order lifecycle state machine** (`CREATED → VALIDATED →
+  INVENTORY_PENDING → INVENTORY_RESERVED → FULFILLMENT_ASSIGNED →
+  PROCESSING → SHIPPED`, plus `CANCELLED`/`FAILED`) with idempotent
+  creation (`Idempotency-Key`) and optimistic-versioned transitions.
+- **Row-locked inventory reservation** with a stock-check endpoint and
+  fulfillment-node scoring — verified live: 10 threads racing for the last
+  unit of stock, exactly 1 succeeds.
+- **A custom saga orchestrator**: node scoring, deterministic payment
+  simulation, compensation on failure, retry with backoff+jitter,
+  dead-letter routing, and a replay CLI. A live compose run forcing a
+  payment decline confirmed the released inventory reservation was
+  actually restored in Postgres, not just marked failed.
+- **Transactional outbox** on every event-producing service, so an event
+  is never published without the state change that caused it having
+  already committed ([ADR 0003](docs/adrs/0003-transactional-outbox.md)).
+- **Two deliberate concurrency strategies** by contention profile: row-
+  level locking for hot `inventory_stock` rows, optimistic `version`
+  columns for low-contention `orders`
+  ([ADR 0002](docs/adrs/0002-inventory-concurrency-control.md)).
+- **Tracing that survives the Kafka boundary**: one Jaeger trace covers a
+  single order across the gateway, order service, and every asynchronous
+  saga step.
+- **Sixteen real bugs found and fixed by actually running the system** —
+  Spark scheduler starvation, a Structured Streaming metadata-visibility
+  gap, a dedup watermark declared on the wrong timestamp column silently
+  dropping valid rows, a recursive-forecast row-ordering bug caught by a
+  regression test before it shipped, a malformed Kafka record that could
+  crash any consumer forever, a saga-resume startup crash, a dead-letter
+  replay tool that had never actually worked, and more — full writeups in
+  `DECISIONS.md`.
+
+## Data platform and forecasting
 
 PySpark Structured Streaming (`local[*]`, single-node) reads all 11
-event-catalog topics into Bronze (immutable raw Parquet, with malformed/
-unparseable Kafka records quarantined to their own path rather than
-written with null envelope fields), validates and deduplicates into Silver
-(rejects and late events routed to their own paths, never dropped
-silently), and aggregates into 10 Gold datasets. Also included: a synthetic
-event generator with configurable duplicate/late-event/malformed-record
-injection, an executable data-quality suite (reconciliation, rejection
-rate, duplicate rate, lateness, freshness) with a JSON report, batch
-backfill/reprocessing tooling with row-count validation before swapping
-into the live path, a MinIO data-lake inspection CLI, and an end-to-end
-smoke test (`make phase6-smoke`). Full design: `docs/data-pipeline.md`,
-`docs/phase-6-streaming-data-platform.md`.
+event-catalog topics into Bronze (immutable raw Parquet, malformed records
+quarantined rather than written with null fields), validates and
+deduplicates into Silver (rejects and late events routed to their own
+paths, never dropped silently), and aggregates into 10 Gold datasets. A
+pandas/scikit-learn forecasting pipeline (no Spark/JVM needed) evaluates a
+`HistGradientBoostingRegressor` secondary model against a seasonal-naive
+baseline on a deterministic synthetic demand history, using chronological
+(never random) evaluation — the secondary model genuinely beat the
+baseline on this session's smoke run (WAPE 0.154 vs. 0.298) and was
+selected champion by a documented rule. Also included: an executable
+data-quality suite (reconciliation, rejection rate, duplicate rate,
+lateness, freshness) with a JSON report, batch backfill/reprocessing
+tooling with row-count validation, and a MinIO data-lake inspection CLI.
+Full design: `docs/data-pipeline.md`, `docs/phase-6-streaming-data-platform.md`,
+`docs/phase-6-demand-forecasting.md`,
+[ADR 0006](docs/adrs/0006-forecasting-scope.md).
 
-## Demand forecasting
-
-A pandas/scikit-learn batch pipeline (`services/data-platform/app/
-forecasting`, no Spark/JVM needed) over a deterministic synthetic demand
-history (SKU x location x date grain — the real event catalog has no
-location attribution to build this from yet, and live volume is too small
-either way, both confirmed before building anything): feature engineering
-with tested leakage safeguards, a seasonal-naive baseline, a
-`HistGradientBoostingRegressor` secondary model, chronological (never
-random) evaluation with rolling-origin walk-forward folds, MAE/RMSE/WAPE
-computed from real predictions, a documented measured champion-selection
-rule, recursive multi-step future forecasts, and local model-artifact
-persistence. Full CLI (`python -m app.forecasting.cli`), 12
-`make forecast-*` targets, and an end-to-end local smoke test
-(`make forecast-smoke`, no live MinIO/Kafka needed). Full design:
-`docs/phase-6-demand-forecasting.md`, [ADR 0006](docs/adrs/0006-forecasting-scope.md).
-
-## Operations dashboard
-
-A React + TypeScript single-page app (`services/ops-dashboard`, Vite +
-`react-router-dom`), served by its own nginx image and reverse-proxying
-same-origin to the API Gateway, Inventory Service, Fulfillment Orchestrator,
-Failure Laboratory, and Prometheus — no CORS changes needed on any backend.
-Ten screens: Overview, Orders (create/cancel/track, status-history
-timeline), Inventory & Fulfillment Nodes, Saga Monitor, Dead Letter Queue,
-Observability (live Prometheus queries), Data Quality, Data Platform,
-Demand Forecasting, and Failure Laboratory (Phase 8 — 10 deterministic
-failure scenarios, triggered and reset through a real backend). Seven of
-the ten screens are fully live against real running services; the other
-three mix real measured numbers with clearly-labeled local fallback data
-where no read API exists yet (documented per-screen in
-`docs/phase-7-ops-dashboard.md`).
-
-**Real login required as of Phase 9** (ADR 0009): a real login screen
-authenticates against api-gateway's `POST /auth/login` (bcrypt-verified
-credentials, a real Postgres `users` table), and every session carries a
-short-lived JWT. Creating/cancelling an order and triggering/resetting a
-Failure Lab scenario are hidden for a `viewer` session (a UI convenience —
-the actual boundary is api-gateway's/failure-lab's own 401/403, not the
-dashboard hiding a button). 82 passing tests (Vitest + React Testing
-Library).
-
-## Authentication & authorization
+## Security model
 
 Self-contained JWT auth + role-based access control
-([ADR 0009](docs/adrs/0009-authn-authz.md)) — no external identity provider,
-consistent with this project's "no paid services" constraint. api-gateway
-owns a `users` table (bcrypt-hashed passwords via `passlib`) and issues
-short-lived signed JWTs (`POST /auth/login`); every protected route
+([ADR 0009](docs/adrs/0009-authn-authz.md)) — no external identity
+provider. api-gateway owns a `users` table (bcrypt-hashed passwords) and
+issues short-lived signed JWTs (`POST /auth/login`); every protected route
 verifies signature, issuer, audience, and expiration before checking a
-ranked role (`viewer < ops < admin` — `admin` inherits every `ops`
-permission, not a separately-maintained list). Enforced on api-gateway's
-customer-facing proxy routes (`POST/GET /api/orders*`, `GET
-/api/inventory/stock/*`) and failure-lab's scenario trigger/reset routes —
-the two surfaces ADR 0009 itself names; `/healthz`/`/readyz`/`/metrics`
-stay public everywhere. Three demo accounts are seeded idempotently at
-every api-gateway startup (`admin@omniflow.local`/`ops@omniflow.local`/
-`viewer@omniflow.local`, dev-only passwords documented in
-`.env.example`) plus a scoped `ops`-role service account failure-lab's own
-scenario runner authenticates as for its machine-to-machine calls against
-the gateway. Deliberately **not** extended to order-service/
-inventory-service/fulfillment-orchestrator's own HTTP routes — those are
-called directly by the real saga orchestrator and failure-lab with no user
-JWT to present, and protecting them would need a second, broader
-service-to-service auth layer outside this phase's documented scope; see
-`RISKS.md` #25/#34 and `DECISIONS.md` "Phase 9" for the full reasoning.
-52 new backend tests cover the token lifecycle and the 401-vs-403
-boundary, including every negative-token case (expired, malformed,
-missing, wrong-signature, wrong-audience, wrong-issuer, insufficient-role).
+ranked role (`viewer < ops < admin`). Enforced on api-gateway's
+customer-facing proxy routes and failure-lab's trigger/reset routes — the
+two surfaces ADR 0009 names; `/healthz`/`/readyz`/`/metrics` stay public
+everywhere. Three demo accounts are seeded idempotently at every
+api-gateway startup (dev-only passwords in `.env.example`). Deliberately
+**not** extended to inventory-service/fulfillment-orchestrator's own
+routes — see `RISKS.md` #25/#34. 52 backend tests cover the token
+lifecycle and the 401-vs-403 boundary, including every negative-token case.
 
-## Observability
+## Reliability and failure-laboratory summary
+
+10 deterministic failure scenarios (`services/failure-lab`), each
+triggered through a real backend API and exercised against the real
+running stack — never simulated only in the browser — covering saga
+compensation, retry/backoff, row-level-lock concurrency, request- and
+event-level idempotency, dead-letter routing, Bronze/Silver data quality,
+and saga crash-resume. Verified twice in a row against the live stack
+(`make phase8-smoke`). Trigger/observe/reset flow diagram:
+`docs/architecture.md`. Known, accepted gap: the saga resume gap between a
+successful remote reservation and its local commit (`RISKS.md` #11).
+
+## Observability summary
 
 Structured JSON logs with `correlation_id` on every line; OpenTelemetry
-tracing pushed to Jaeger, with trace context carried across the Kafka
-boundary in the event envelope itself; Prometheus metrics pulled from every
-FastAPI service, every background worker, and every Spark bronze/silver/
-gold job (`data_platform_batch_rows_total`/`data_platform_batch_duration_seconds`);
-a provisioned Grafana dashboard (request rate/latency, Kafka lag/retries/
-DLQ, saga duration, DB pool).
+tracing pushed to Jaeger with trace context carried across the Kafka
+boundary in the event envelope itself; Prometheus metrics pulled from
+every FastAPI service, every background worker, and every Spark
+bronze/silver/gold job; a provisioned Grafana dashboard (request rate/
+latency, Kafka lag/retries/DLQ, saga duration, DB pool).
 
-## Load testing
-
-k6 (`k6/`), run through the real `api-gateway` container over five profiles
-— smoke, baseline, load, stress, spike (`make load-smoke`/`load-baseline`/
-`load-test`/`load-stress`/`load-spike`) — each with explicit, enforced
-thresholds for error rate and p95/p99 latency/throughput, real JWT login
-via the seeded demo accounts, and deterministic, collision-free test data.
-Workloads: login, order creation, order retrieval, inventory lookup,
-concurrent order submissions, and a real end-to-end order →
-fulfillment-saga workflow (create, then poll through the real gateway to
-`SHIPPED`). All five profiles passed for real in this session — 0%
-HTTP-level failure rate at every scale tested, up to 68 combined peak VUs —
-with honest, unhidden real-world limits: `stress`/`spike` show end-to-end
-fulfillment completion degrading under real backlog pressure (a measured
-single-instance saga-consumer throughput ceiling), while the gateway/API
-layer itself stayed error-free throughout. Full detail, every threshold,
-and every real finding (including a real Makefile bug and a host-CPU
-contention issue found and fixed by actually running this):
-`docs/phase-10-load-testing.md`.
-
-## AWS infrastructure (Terraform)
-
-Per [ADR 0007](docs/adrs/0007-terraform-not-applied.md): realistic, modular
-Terraform under `infra/terraform/` (13 modules + `dev`/`prod` environments)
-mapping the running stack onto ECS Fargate (all 13 application deployables),
-RDS PostgreSQL, MSK (managed Kafka, IAM auth), S3 (replacing MinIO, same
-prefix layout), EMR Serverless (Spark bronze/silver/gold, per ADR 0005's own
-named cloud target), ElastiCache Redis (modeled for `RISKS.md` #13's
-documented next step, not yet consumed by application code), an ALB with
-host-based routing to api-gateway/ops-dashboard, least-privilege IAM per
-service, Secrets Manager for every credential (Terraform-generated, never a
-literal value in a tfvars file), and CloudWatch for logs/metrics/alarms —
-**authored and validated only** (`terraform fmt`/`init -backend=false`/
-`validate`, all via the official `hashicorp/terraform` Docker image, zero
-warnings): no AWS credentials were used, no AWS API was called, and nothing
-here has ever been planned, applied, or paid for. Full architecture, cost
-drivers, and every documented limitation (a manual per-service-database
-bootstrap step, ops-dashboard's nginx resolver needing an AWS-specific
-change, tracing having no cloud backend wired up, EMR Serverless
-custom-image compatibility): `infra/terraform/README.md`.
-
-## Verified test and environment evidence
-
-Host: Docker 29.6.2 + Compose v5.3.1, 8 CPUs, 15Gi RAM, ~950G disk. No host
-Python/Node/Java/Terraform — every build, test, and lint command runs inside
-a container.
+## Test and quality evidence
 
 | Suite | Passed | Failed |
 |---|---|---|
@@ -319,32 +203,57 @@ a container.
 | api-gateway | 30 | 0 |
 | data-platform | 145 | 0 |
 | failure-lab | 76 | 0 |
-| **Total** | **411** | **0** |
+| **Backend total** | **411** | **0** |
+| Dashboard (Vitest, 19 files) | 82 | 0 |
 
-data-platform's 145 includes 91 forecasting tests (`tests/forecasting/`) —
-unit tests for synthetic-data determinism, feature/leakage correctness,
-data-quality checks, chronological splits, both models, metrics, champion
-selection, and artifact persistence, plus pipeline tests for dataset
-preparation and a full end-to-end CLI run.
+Combined coverage **80.9%** (`coverage.xml`, 65% threshold enforced);
+`mypy` passes clean across all 7 packages; `ruff check`/`ruff format
+--check` pass clean; `bandit` 0 medium/high; `pip-audit` clean after fixing
+5 CVEs outright and individually justifying 9 accepted ones (`RISKS.md`
+#20). Full detail, including every bug found while producing these
+numbers: `TEST_RESULTS.md`.
 
-Also verified against a real, freshly-started `docker compose up`: the full
-order lifecycle end to end (including the payment-decline/compensation
-path), traces landing in Jaeger, all Prometheus scrape targets up with real
-samples, the Grafana dashboard provisioned, (Phase 4) real Bronze/
-Silver/Gold Parquet plus a passing data-quality report, and (Phase 8) all
-10 failure-lab scenarios reaching PASSED/RECOVERED twice in a row against
-the live stack (`make phase8-smoke`). `mypy` passes clean across all seven
-packages; `ruff check`/`ruff format --check` pass clean. Full detail,
-including every bug found and fixed while producing these numbers:
-`TEST_RESULTS.md`.
+## Load-testing evidence
 
-**Engineering quality** (`make ci`, exit 0, reverified this session):
-combined coverage 80.9% (threshold 65%, `coverage.xml` generated),
-`bandit` 0 medium/high,
-`pip-audit` clean after fixing 5 CVEs outright and individually accepting 9
-with a written, verified reason each (`RISKS.md` #20), `docker compose
-config` valid, all six application images build. Full detail:
-`docs/phase-5-engineering-quality.md`.
+k6 (`k6/`) against the real `api-gateway` container, five profiles —
+smoke, baseline, load, stress, spike — each with explicit, enforced
+thresholds for error rate and p95/p99 latency, real JWT login, and a real
+end-to-end order → fulfillment-saga workflow polled to `SHIPPED`. All five
+passed for real: **0% HTTP-level failure rate at every scale tested**;
+`load` profile sustained 28.70 req/s (1,520 requests, p95 292.9ms);
+`stress` reached 68 combined peak VUs (2,106 requests, p95 699.0ms) with
+0% failures. The honest finding, not hidden: end-to-end saga completion
+degrades under real backlog pressure (100% at smoke/baseline/load, 75% at
+stress, 50% at spike) — the measured single-instance saga-consumer
+throughput ceiling, well before any HTTP-level failure appears. Full
+detail: `docs/phase-10-load-testing.md`, `docs/project-evidence.md`.
+
+## GitHub Actions CI evidence
+
+`.github/workflows/ci.yml` (job `quality-gate`) mirrors `make ci`
+job-for-job on a free `ubuntu-latest` runner. Verified against GitHub's
+public Actions API this session: **33 total hosted runs**, going back to
+Phase 5. The Phase 12 hardening branch shows a genuine hosted-only failure
+(runs #29/#30 on commit `7fdd9ec`) caught and fixed within that same
+branch (runs #31/#32 on commit `375ea9e`), and the merge to `main`
+(`e402f37`, run #33) is green. Full run table: `TEST_RESULTS.md`.
+
+## AWS infrastructure (Terraform)
+
+Per [ADR 0007](docs/adrs/0007-terraform-not-applied.md): realistic,
+modular Terraform under `infra/terraform/` (13 modules + `dev`/`prod`
+environments) mapping the running stack onto ECS Fargate (all 13
+application deployables), RDS PostgreSQL, MSK (managed Kafka, IAM auth),
+S3 (replacing MinIO, same prefix layout), EMR Serverless (Spark
+bronze/silver/gold), ElastiCache Redis (modeled, not yet consumed by app
+code), an ALB with host-based routing, least-privilege IAM per service,
+Secrets Manager for every credential, and CloudWatch for logs/metrics/
+alarms — **authored and validated only**: `terraform fmt -check
+-recursive`, `terraform init -backend=false`, and `terraform validate` all
+pass with **zero warnings**, run through the official `hashicorp/
+terraform` Docker image. **No AWS credentials were used, no AWS API was
+called, and nothing here has ever been planned, applied, or paid for.**
+Full architecture and every documented limitation: `infra/terraform/README.md`.
 
 ## Quick-start instructions
 
@@ -356,59 +265,16 @@ cp .env.example .env
 make demo        # docker compose up --build, then prints the service URLs
 ```
 
-Other useful targets:
+A curated list of every other `make` target (tests, data platform,
+forecasting, load testing, Terraform validation, dashboard tooling) is
+available via `make help`, and is unchanged in scope from prior phases —
+see `PROJECT_STATUS.md` for the full history of when each target was added.
 
-```bash
-make test         # all seven service test suites, each against its own *_test database
-make typecheck    # mypy, per service
-make lint         # ruff check
-make format       # ruff format
-make migrate      # apply Alembic migrations
-make smoke        # end-to-end order lifecycle + observability verification
-make generate     # run the synthetic event generator against the live stack
-make dq-report    # run the data-quality report against live MinIO data
-make backfill     # Silver/Gold backfill and reprocessing tooling
-make phase6-smoke # end-to-end data-platform smoke test (generate -> bronze -> silver -> gold -> dq-report)
-make inspect-bronze / inspect-silver / inspect-gold / inspect-bronze-rejects / inspect-silver-rejects / inspect-late-events
-                  # inspect MinIO data-lake prefixes from the command line
-make forecast-run     # full demand-forecasting pipeline: generate -> prepare -> train both models -> evaluate -> select -> forecast
-make forecast-smoke   # end-to-end forecasting smoke test, entirely local (no live MinIO/Kafka needed)
-make forecast-inspect ARGS="forecast"  # inspect forecast output / metrics / selection / dataset
-make test-failure-lab # the failure-lab service's own unit/API test suite
-make phase8-smoke     # trigger all 10 failure-lab scenarios against the live stack, twice
-make replay ARGS="--all"  # replay unreplayed dead letters (CLI, also a dashboard button since Phase 8)
-make reset        # tear down containers and volumes for a clean slate
-make logs         # tail all service logs
+## Demo workflow
 
-make load-setup   # seed fixed load-test fulfillment node + SKU pool (idempotent)
-make load-smoke   # k6 smoke profile — sanity check every workload at trivial scale
-make load-baseline # k6 baseline profile — "normal expected traffic" measurement
-make load-test    # k6 load profile — ramps to a moderate sustained peak
-make load-stress  # k6 stress profile — finds this stack's real breaking point
-make load-spike   # k6 spike profile — sudden burst, checks recovery
-make load-validate # every k6 profile + the existing project CI gate
-make load-clean   # remove local k6 report output (load-test-reports/)
-
-make setup-dev    # build the shared devtools image (once, or after editing it)
-make coverage     # all seven suites w/ coverage, combined coverage.xml, threshold-enforced
-make security     # bandit (SAST) + pip-audit (dependency CVEs)
-make pre-commit   # pre-commit hooks against the whole tree
-make docker-validate  # docker compose config
-make docker-build     # build all six application images (incl. ops-dashboard, failure-lab)
-make ci           # the full local gate: format-check, lint, typecheck, coverage, security, dashboard, docker
-
-make tf-fmt-check   # terraform fmt -check -recursive over infra/terraform
-make tf-init        # terraform init -backend=false, every module + environment (no credentials, no AWS calls)
-make tf-validate    # terraform validate, every module + environment
-make tf-validate-all # fmt-check + init + validate, in that order — never plan or apply
-
-make dashboard-install / dashboard-lint / dashboard-format / dashboard-format-check
-                  # ops dashboard: npm install / eslint / prettier --write / prettier --check
-make dashboard-typecheck / dashboard-test / dashboard-build
-                  # ops dashboard: tsc --noEmit / vitest run / production build
-make dashboard-validate  # all of the above, in fail-fast order
-make help         # list every target with its description
-```
+For a time-boxed, reliable walkthrough (5-minute and 15-minute paths,
+demo accounts, troubleshooting, and an explicit "never run" list): see
+`docs/demo-guide.md`.
 
 ## Project Screenshots
 
@@ -445,25 +311,24 @@ services/
   fulfillment-orchestrator/ Saga engine, node scoring, payment sim, DLQ, replay
   event-contracts/         Shared Kafka helpers, schemas, logging/tracing/metrics setup
   data-platform/            Spark Bronze/Silver/Gold, DQ, generator, backfill, forecasting
-  ops-dashboard/            React + TypeScript ops dashboard, nginx reverse proxy (Phase 7)
-  failure-lab/              10 deterministic failure scenarios, trigger/reset API (Phase 8)
-k6/                         Load-test scripts (Phase 10) — scenarios.js + lib/{config,auth,ids,profiles}.js
+  ops-dashboard/            React + TypeScript ops dashboard, nginx reverse proxy
+  failure-lab/              10 deterministic failure scenarios, trigger/reset API
+k6/                         Load-test scripts — scenarios.js + lib/{config,auth,ids,profiles}.js
 infra/docker/               Compose service configs (Grafana, Prometheus, MinIO, Redpanda, OTel,
                              devtools — the shared ruff/mypy/pytest/bandit/pip-audit/pre-commit image)
-infra/terraform/            AWS infrastructure (Phase 11) — 13 modules (networking, security, ecr,
-                             iam, secrets, rds, elasticache, msk, s3, alb, ecs, emr, observability) +
+infra/terraform/            AWS infrastructure — 13 modules (networking, security, ecr, iam,
+                             secrets, rds, elasticache, msk, s3, alb, ecs, emr, observability) +
                              dev/prod environments; authored + validated only, never applied (ADR 0007)
-.github/workflows/           ci.yml — GitHub Actions, mirrors `make ci`
+.github/workflows/           ci.yml — GitHub Actions, mirrors `make ci`, real hosted run history
 docs/                       Architecture, event catalog, data model, data pipeline, ADRs,
-                             phase-5-engineering-quality.md, phase-7-ops-dashboard.md,
-                             phase-8-failure-laboratory.md, phase-10-load-testing.md
-scripts/                    compose_smoke_test.sh (make smoke), phase8_smoke_test.sh (make phase8-smoke),
-                             load_test_setup.sh (make load-setup)
-docker-compose.yml, Makefile, .env.example, .pre-commit-config.yaml, .dockerignore
-PROJECT_STATUS.md, RISKS.md, DECISIONS.md, TEST_RESULTS.md
+                             portfolio-case-study.md, demo-guide.md, interview-guide.md,
+                             career-deliverables.md, project-evidence.md, phase-*.md
+scripts/                    compose_smoke_test.sh, phase8_smoke_test.sh, load_test_setup.sh
+docker-compose.yml, Makefile, .env.example, .pre-commit-config.yaml, .dockerignore, LICENSE
+PROJECT_STATUS.md, RISKS.md, DECISIONS.md, TEST_RESULTS.md, CONTRIBUTING.md
 ```
 
-## Architecture decisions worth reviewing
+## Key design decisions
 
 | ADR | Decision |
 |---|---|
@@ -474,103 +339,95 @@ PROJECT_STATUS.md, RISKS.md, DECISIONS.md, TEST_RESULTS.md
 | [0005](docs/adrs/0005-spark-local-mode.md) | PySpark Structured Streaming, single-node `local[*]` |
 | [0006](docs/adrs/0006-forecasting-scope.md) | Demand forecasting: baseline first, lightweight secondary model |
 | [0007](docs/adrs/0007-terraform-not-applied.md) | Terraform authored + validated, never applied |
+| [0008](docs/adrs/0008-monorepo-layout.md) | Monorepo layout and service boundaries |
 | [0009](docs/adrs/0009-authn-authz.md) | Self-contained JWT + RBAC over a third-party IdP |
 | [0010](docs/adrs/0010-node-scoring-and-saga-orchestration.md) | Node-scoring formula, direct-REST saga coordination |
 
-Full index of all 10 ADRs: `docs/adrs/README.md`.
+Full index of all 10 ADRs: `docs/adrs/README.md`. Deeper narrative on
+trade-offs and hardest problems: `docs/portfolio-case-study.md`.
 
 ## Known limitations
 
 - **Saga resume gap**: a crash between a successful remote reservation and
-  the saga's local commit of that step leaves no local record — fails loudly
-  rather than double-reserving or guessing. Accepted, not solved (`RISKS.md` #11).
-- **`--once` mode's final Silver micro-batch can leave a real,
-  non-self-healing reconciliation gap** (verified: doesn't clear even after
-  25+ minutes past the watermark) — `Trigger.AvailableNow()` gives no
-  guaranteed flush cycle for a watermark-gated stateful operator's last
-  batch. Not source data loss (Bronze/Kafka still have it); recovered via
-  `app.backfill silver --apply` (`RISKS.md` #22).
-- **Single-instance-only gateway**: in-process rate limiting and per-process
-  DB pooling, would not survive horizontal scaling without a shared backing
-  store (`RISKS.md` #13).
+  the saga's local commit of that step leaves no local record — fails
+  loudly rather than double-reserving or guessing (`RISKS.md` #11).
+- **Single-instance-only gateway**: in-process rate limiting and
+  per-process DB pooling, would not survive horizontal scaling without a
+  shared backing store (`RISKS.md` #13).
 - **Grafana and worker `/metrics` are unauthenticated** — fine for a local
   demo, first thing to change before any shared deployment (`RISKS.md` #14).
-- **Custom saga orchestrator, not a proven framework** — less battle-tested
-  than Temporal; a deliberate scope tradeoff (`RISKS.md` #8).
-- **9 dependency CVEs accepted, not fixed** — mostly `starlette` (pulled in
-  transitively by `fastapi==0.115.0`); the real fix needs a coordinated
-  `fastapi`/`starlette` major-version upgrade across all four HTTP services,
-  verified incompatible with the current pin and scoped as its own
-  follow-up rather than a same-pass bump (`RISKS.md` #20).
+- **Custom saga orchestrator, not a proven framework** — less
+  battle-tested than Temporal; a deliberate scope trade-off (`RISKS.md` #8).
+- **9 dependency CVEs accepted, not fixed** — mostly `starlette`; the real
+  fix needs a coordinated `fastapi`/`starlette` major-version upgrade,
+  scoped as its own follow-up (`RISKS.md` #20).
 - **Coverage is statement-only, not branch**, despite `pyproject.toml`
-  declaring branch coverage on — each service's own test container lacks
-  the repo-root `pyproject.toml` at collection time
-  (`docs/phase-5-engineering-quality.md`).
+  declaring branch coverage on (`docs/phase-5-engineering-quality.md`).
 - **Demand forecasting is bounded by synthetic data's realism**, and its
-  recursive multi-step future-forecast rollout has no native multi-horizon
-  head — step-to-step prediction error can compound across the horizon.
-  Both documented, not glossed over (`docs/phase-6-demand-forecasting.md`
-  'Limitations').
-- **Ops dashboard now requires login** (Phase 9), but two of its four
-  proxied backends — inventory-service and fulfillment-orchestrator — still
-  accept unauthenticated requests directly, since those routes are also
-  called by the real saga orchestrator/failure-lab with no user JWT to
-  present; a real fix needs a second, broader service-to-service auth
-  layer, out of this phase's documented (ADR 0009) scope (`RISKS.md`
-  #25/#34). **Order listing is client-curated, not server-listed** (Order
-  Service has no list-all endpoint), and three of the ten screens (Data
-  Quality, Data Platform, part of Demand Forecasting) show clearly-labeled
-  local mock data pending a real MinIO read API. All named, not glossed
-  over, in `docs/phase-7-ops-dashboard.md` 'Limitations'. (DLQ replay is a
-  working button as of Phase 8 — see below.)
-- **No refresh-token rotation** — a JWT expires after 30 minutes and the
-  user has to log in again; a deliberate simplification named in ADR
-  0009's own consequences, not an oversight.
-- **Failure lab's downstream-outage scenario simulates the outage
-  in-process rather than actually stopping the container** (a real
-  `docker compose stop` would affect every concurrent user of a shared dev
-  environment) — the gateway's `/readyz` and the resulting dead-letter are
-  still genuinely observed, not mocked (`RISKS.md` #32,
-  `docs/phase-8-failure-laboratory.md`).
-
-- **Load-test numbers are laptop/Docker-Desktop measurements, not a
-  cloud-scale capacity claim** — single Postgres/api-gateway/order-service/
-  inventory-service/fulfillment-orchestrator instances, sharing an 8-CPU/
-  15Gi host with the rest of the stack. `stress`/`spike` show real,
-  measured end-to-end fulfillment degradation (a single sequential saga
-  consumer's throughput ceiling) well before any HTTP-level failure
-  appears — documented, not glossed over, in
-  `docs/phase-10-load-testing.md` 'Limitations' (`RISKS.md` #36-#38).
-
-- **Terraform (Phase 11) has never been applied** — authored and validated
-  (`fmt`/`init -backend=false`/`validate`, zero warnings) only, per ADR
-  0007. Deploying it for real would additionally need: an out-of-band ACM
-  certificate + DNS, a manual per-service-database bootstrap step (RDS
-  creates only 1 of 5 logical databases), a small application-config change
-  to `ops-dashboard/nginx.conf`'s DNS resolver, a small fallback in
-  `data-platform/app/s3.py` for IAM-role-based S3 auth, and a distributed
-  tracing backend (none is wired up — CloudWatch replaces
-  Jaeger/Prometheus/Grafana for logs/metrics/alarms only). Every one of
-  these is named, not silently assumed solved — full detail:
-  `infra/terraform/README.md` 'Explicit assumptions and limitations'.
+  recursive rollout has no native multi-horizon head
+  (`docs/phase-6-demand-forecasting.md` "Limitations").
+- **Two of the dashboard's proxied backends** (inventory-service,
+  fulfillment-orchestrator) still accept unauthenticated requests directly
+  — a real fix needs a second, broader service-to-service auth layer
+  (`RISKS.md` #25/#34). Three of ten dashboard screens show clearly-
+  labeled local mock data pending a real MinIO read API.
+- **No refresh-token rotation** — a deliberate simplification, not an
+  oversight (ADR 0009).
+- **Failure lab's `downstream-outage` scenario simulates the outage
+  in-process** rather than stopping the real container (`RISKS.md` #32).
+- **Load-test numbers are laptop/Docker-Desktop measurements**, not a
+  cloud-scale capacity claim (`RISKS.md` #36-#38).
+- **Terraform has never been applied** — authored and validated only.
+  Deploying it for real would additionally need an out-of-band ACM
+  certificate + DNS, a manual per-service-database bootstrap step, an
+  nginx DNS-resolver change, an S3 IAM-role auth fallback, and a
+  distributed tracing backend (`RISKS.md` #39-#43,
+  `infra/terraform/README.md`).
 
 Full risk register, with status and mitigation for each: `RISKS.md`.
 
-## Remaining roadmap
+## Future production-readiness work
 
-Phase 13 (final documentation/career deliverables) not yet started. Phase
-12 is partially done — the CI workflow is authored and its steps verified
-locally via `make ci`, but an actual GitHub-hosted run remains open. Phase
-11 (AWS infrastructure in Terraform, authored/validated only, per
-[ADR 0007](docs/adrs/0007-terraform-not-applied.md)) is now done — see
-`infra/terraform/README.md`. Phase 7 (React/TypeScript ops dashboard) and
-Phase 8 (Failure laboratory) are done — see
-`docs/phase-7-ops-dashboard.md`/`docs/phase-8-failure-laboratory.md`. Phase
-9 (Security hardening) is done — see `DECISIONS.md` "Phase 9". Phase 10
-(load testing) is done — see `docs/phase-10-load-testing.md`. Full scope
-per phase: `PROJECT_STATUS.md`.
+The concrete next steps named throughout this project's own risk register:
+close the saga resume gap with reservation idempotency keys, horizontally
+scale the saga consumer, move rate limiting/connection pooling to a shared
+backing store, complete the `fastapi`/`starlette` upgrade, extend
+authentication to the two remaining internal services, and actually deploy
+the Terraform after closing its named AWS-specific gaps. Full list:
+`docs/portfolio-case-study.md` "What would change for a real production
+deployment".
 
-## License status
+Separately, and **not yet started**: an optional future capstone,
+"OmniFlow Verifiable Production Readiness Lab" — possible scope includes
+OpenTelemetry end-to-end tracing, resilience certification, policy as
+code, software supply-chain security, and automated production-readiness
+evidence reports. This is documented here as a possible future direction
+only; none of it exists in this repository today.
 
-No `LICENSE` file exists yet. One is planned alongside the rest of the
-documentation set in Phase 13.
+## Documentation index
+
+| Doc | Covers |
+|---|---|
+| `CONTRIBUTING.md` | Environment setup, standing project rules, engineering conventions |
+| `PROJECT_STATUS.md` | Phase-by-phase build log — what exists, what's next |
+| `RISKS.md` | Full risk register with status and mitigation |
+| `DECISIONS.md` | Chronological decisions log, newest first |
+| `TEST_RESULTS.md` | Raw test/coverage/load/CI/Terraform command output |
+| `docs/architecture.md` | Container, sequence, failure-recovery, and AWS-mapping diagrams |
+| `docs/system-context.md` | External system-context view |
+| `docs/event-catalog.md` | All 11 event types, schema versioning rules |
+| `docs/data-model.md` | Database schema, cross-service reference integrity |
+| `docs/data-pipeline.md` | Bronze/Silver/Gold design, watermarks, backfill |
+| `docs/product-requirements.md` | Business scenario, functional/non-functional requirements |
+| `docs/adrs/` | All 10 architecture decision records |
+| `docs/phase-*.md` | Phase-specific deep detail (engineering quality, forecasting, streaming, dashboard, failure lab, load testing) |
+| `docs/portfolio-case-study.md` | Engineering case study — problem, trade-offs, hardest problems, lessons |
+| `docs/demo-guide.md` | Time-boxed recruiter/interviewer demo walkthrough |
+| `docs/interview-guide.md` | Talking points at multiple depths, anticipated questions |
+| `docs/career-deliverables.md` | Résumé bullets, recruiter/LinkedIn copy, skills keywords |
+| `docs/project-evidence.md` | Traceable capability → validation → result table |
+| `infra/terraform/README.md` | AWS architecture, validation evidence, limitations |
+
+## License
+
+MIT — see `LICENSE`.

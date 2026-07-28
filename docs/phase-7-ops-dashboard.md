@@ -35,7 +35,8 @@ client-side" boundary, unchanged since Phase 0).
   started") — there is no `users` table, no login route, nothing to
   authenticate this dashboard's own users against. Building a login screen
   with nothing real behind it would be exactly the kind of fabricated
-  capability `CLAUDE.md` forbids, so the dashboard is unauthenticated,
+  capability this project's standing rules (`CONTRIBUTING.md`) forbid, so
+  the dashboard is unauthenticated,
   matching the backend's current, honest state. This is named again as a
   limitation below, not glossed over.
 - Phase 8 (Failure Laboratory). Not started (`PROJECT_STATUS.md`), so its

@@ -1,9 +1,44 @@
 # Project Status
 
-Last updated: 2026-07-27 (Phase 11, AWS infrastructure/Terraform, complete
-and verified — see notes below).
+Last updated: 2026-07-27 (Phase 13, final documentation/portfolio/career
+deliverables, complete — see notes below). **All 13 roadmap phases are
+now done.**
 
 ## Current phase
+
+**Phase 13 (final documentation, portfolio, and career deliverables)
+complete.** Closed the documentation staleness left over from Phase 11
+(this document, `RISKS.md`, `DECISIONS.md`, `TEST_RESULTS.md`, and
+`README.md` had not been updated since Phase 11, so they still described
+Phase 12's CI as local-only even after it was verified on GitHub-hosted
+runners), fixed six broken relative doc links (`docs/reliability.md` and
+`docs/testing-strategy.md` were referenced from several files but never
+existed — redirected to `RISKS.md`, `docs/data-pipeline.md`, and
+`TEST_RESULTS.md`, whichever actually held that content), added the
+`failure-lab`/`lag_poller` containers and a failure/recovery-flow diagram
+to `docs/architecture.md` (both were real, running services the container
+diagram had never been updated to include, since Phase 8/4), added a root
+`LICENSE` (MIT), and created five new documents: `docs/portfolio-case-
+study.md`, `docs/demo-guide.md`, `docs/interview-guide.md`,
+`docs/career-deliverables.md`, and `docs/project-evidence.md`. `README.md`
+was restructured for a recruiter-first opening while keeping every
+existing verified claim. No application/service code was touched — this
+phase is documentation-only, per its own scope. Closes `RISKS.md` #6
+(cross-document consistency drift).
+
+**Phase 12 (CI/CD) complete and verified — a real GitHub-hosted CI run
+confirmed.** `.github/workflows/ci.yml`'s single `quality-gate` job
+(checkout, `make format-check`, `lint`, `typecheck`, `setup-dev`,
+`coverage`, `pre-commit`, `security`, `dashboard-validate`,
+`docker-validate`, `docker-build` — job-for-job identical to `make ci`) has
+a real hosted run history on GitHub Actions: 33 total runs as of this
+session, going back to Phase 5. The `phase-12-github-hosted-ci` branch
+itself surfaced two genuine hosted-only failures — runs #29/#30 on commit
+`7fdd9ec` (`conclusion: failure`) — fixed by commit `375ea9e` (runs
+#31/#32, `conclusion: success`), and the merge to `main` (commit `e402f37`,
+run #33) is green. Verified directly against GitHub's public Actions API
+in this session, not assumed from the PR having merged. Full detail:
+`docs/phase-5-engineering-quality.md` (workflow authorship), `TEST_RESULTS.md`.
 
 **Phase 11 (AWS infrastructure, Terraform) complete and verified — authored
 and validated only, never applied (ADR 0007).** Realistic, modular
@@ -96,7 +131,7 @@ targets, 91 new tests, and an end-to-end local smoke test
 
 | Phase | Status | Notes |
 |---|---|---|
-| 0. Planning artifacts | Done | Product requirements, architecture, event catalog, data model, data pipeline design, 9 ADRs, tracking files, README/CLAUDE.md |
+| 0. Planning artifacts | Done | Product requirements, architecture, event catalog, data model, data pipeline design, 9 ADRs, tracking files, README/CONTRIBUTING.md |
 | 1. Core domain | **Done** | Postgres + Alembic, Order Service, Inventory Service, API Gateway — see `TEST_RESULTS.md` |
 | 2. Event platform | **Done** | Redpanda, outbox relays, event-contracts Kafka helpers, order-service validator consumer, fulfillment-orchestrator saga (node scoring, payment sim, compensation, retry+jitter, DLQ, replay) — see below and `TEST_RESULTS.md` |
 | 3. Observability | **Done** | Structured JSON logs w/ correlation IDs, OpenTelemetry distributed tracing (Jaeger, cross-Kafka-hop trace propagation), Prometheus metrics (every service + every background worker), Grafana dashboard, mypy type checking — see below and `TEST_RESULTS.md` |
@@ -108,8 +143,8 @@ targets, 91 new tests, and an end-to-end local smoke test
 | 9. Security hardening | **Done** | Dependency/SAST scanning (bandit + pip-audit) — see `docs/phase-5-engineering-quality.md`; JWT/RBAC (users table, bcrypt, role-ranked authorization, 401/403 boundary) — see below and `DECISIONS.md` "Phase 9" |
 | 10. Testing completion + load test | **Done** | Coverage threshold (65%, measured 71.6%) + `coverage.xml` — see `docs/phase-5-engineering-quality.md`; k6 load testing (5 profiles, real measured results) — see below and `docs/phase-10-load-testing.md` |
 | 11. AWS infrastructure (Terraform) | **Done** | Authored + validated (`fmt`/`init -backend=false`/`validate`, zero warnings), never applied — see below and `infra/terraform/README.md` |
-| 12. CI/CD | Partially pulled forward | `.github/workflows/ci.yml` authored and its steps verified locally via `make ci`; not yet exercised by an actual GitHub-hosted run — see `docs/phase-5-engineering-quality.md` |
-| 13. Documentation & career deliverables | Not started | Remaining docs, final review |
+| 12. CI/CD | **Done** | `.github/workflows/ci.yml` (job `quality-gate`) verified both locally (`make ci`) and by a real GitHub-hosted run — 33 total runs, Phase 12 branch shows a hosted-only failure caught and fixed, final merge to `main` green — see above and `docs/phase-5-engineering-quality.md` |
+| 13. Documentation & career deliverables | **Done** | README rewrite, portfolio case study, demo guide, interview guide, career deliverables, project evidence, LICENSE, architecture-doc consistency pass — see above |
 
 Full phase scope and acceptance criteria: `docs/architecture.md` (diagrams) and
 the phase table originally captured in planning; acceptance criteria are
@@ -123,7 +158,7 @@ restated at the top of each phase's own PR/commit as it lands.
   `docs/data-pipeline.md`
 - `docs/adrs/0001`–`0010` + index (0010: node-scoring formula + saga
   coordination via direct REST)
-- `README.md`, `CLAUDE.md`
+- `README.md`, `CONTRIBUTING.md`
 - `PROJECT_STATUS.md`, `DECISIONS.md`, `RISKS.md`, `TEST_RESULTS.md` (this set)
 - **Phase 1 application code:** event-contracts, order-service,
   inventory-service, api-gateway (see prior status entry / `TEST_RESULTS.md`)
@@ -672,14 +707,13 @@ individual queries outright, not just slowed them down.
 
 ## Next action
 
-Phase 11 (AWS infrastructure, Terraform-only per ADR 0007) is now done —
-see this document's separate note above and `infra/terraform/README.md`.
-Next: Phase 13 (final documentation/career deliverables) and the remaining
-scope of Phase 12 (an actual GitHub-hosted CI run — the workflow itself is
-authored and verified locally via `make ci`, see
-`docs/phase-5-engineering-quality.md`). Phase 5 (Data quality) is done,
-folded into Phase 4; Phase 6 (Demand forecasting) is done; Phase 7 (Ops
-dashboard) is done; Phase 8 (Failure laboratory) is done; Phase 9 (Security
-hardening) is done; Phase 10 (load testing) is done; Phase 11 (Terraform) is
-now fully done. An actual GitHub-hosted CI run (rest of Phase 12) and final
-documentation/career deliverables (Phase 13) remain untouched.
+All 13 roadmap phases are done. There is no further required scope on this
+project's original roadmap. Optional, explicitly-not-yet-started future
+work is documented separately in `README.md` "Future production-readiness
+work" and `docs/portfolio-case-study.md` "What would change for a real
+production deployment" — including a possible future capstone,
+"OmniFlow Verifiable Production Readiness Lab" (OpenTelemetry end-to-end
+tracing, resilience certification, policy as code, software supply-chain
+security, automated production-readiness evidence reports), which is named
+as a possible direction only and has no code or design in this repository
+today.

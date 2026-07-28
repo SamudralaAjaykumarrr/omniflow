@@ -5,6 +5,84 @@ architectural decisions get a full ADR under `docs/adrs/`; this log also
 captures smaller in-flight calls that don't warrant a standalone ADR, plus
 pointers to the ADRs when they do.
 
+## 2026-07-27 — Phase 13: Final documentation, portfolio & career deliverables
+
+Scope: documentation only, per this phase's own explicit constraint — no
+application/service code was changed.
+
+- **Filename choice: `docs/career-deliverables.md`, not the pre-existing
+  forward-referenced `docs/resume-evidence.md`.** Several files
+  (`CONTRIBUTING.md`, `RISKS.md` #4, ADR 0005, `docs/product-requirements.md`)
+  already forward-referenced a not-yet-created `docs/resume-evidence.md`
+  from earlier phases. This phase's own instructions named
+  `docs/career-deliverables.md` and `docs/project-evidence.md` instead.
+  Used the names given this phase and updated every stale forward-reference
+  to match, rather than creating a third, redundant file under the old name.
+- **`docs/reliability.md` and `docs/testing-strategy.md` were never
+  created**, despite being referenced from `docs/adrs/0004`,
+  `docs/data-pipeline.md`, `docs/product-requirements.md`, `DECISIONS.md`,
+  `docs/event-catalog.md`, and `docs/data-model.md`. Rather than inventing
+  two new documents not requested by this phase's scope, every reference
+  was redirected to the document that actually already holds that content:
+  `RISKS.md` for reliability/scale-out discussion, `docs/data-pipeline.md`'s
+  own data-quality-checks section for the referential-integrity check, and
+  `TEST_RESULTS.md`/`services/event-contracts/tests/` for contract-test
+  evidence.
+- **`docs/architecture.md`'s container diagram was missing two real
+  services** (`failure-lab`, built in Phase 8; `lag_poller`, built in Phase
+  4) and its prose still described the Ops Dashboard as "not-yet-built" and
+  Spark/the dashboard read API as "not yet implemented as of Phase 2" —
+  both had shipped for phases. Added both containers, their relationships,
+  and a new "Failure laboratory: trigger / observe / reset flow" sequence
+  diagram (the spec's required failure/recovery-flow diagram — the existing
+  "Saga compensation" diagram covers one specific saga-level failure path,
+  not the more general failure-lab mechanism).
+- **A GitHub Actions status badge was added to `README.md`**, referencing
+  the real `.github/workflows/ci.yml` workflow — verified safe to add per
+  this phase's own rule ("acceptable only if it references the real
+  repository workflow correctly") since Phase 12 confirmed 33 real hosted
+  runs exist for this exact workflow path.
+- **License: MIT**, added as `LICENSE` at the repo root. `README.md` had
+  already committed to adding one "alongside the rest of the documentation
+  set in Phase 13" from an earlier phase, so this was confirmed rather than
+  newly decided — MIT chosen as the standard permissive choice for a
+  portfolio repo, confirmed with the repo owner before adding it.
+
+## 2026-07-27 — Phase 12: CI/CD (GitHub-hosted run)
+
+The `phase-5-engineering-quality` branch had already authored
+`.github/workflows/ci.yml` and verified its steps locally via `make ci` —
+this pass closes the remaining Phase 12 scope: proving the workflow actually
+runs correctly on GitHub's own hosted runners, not just inside this
+session's Docker sandbox.
+
+- **Verification method: GitHub's public REST API, not the merged-PR status
+  alone.** A merged PR only proves the branch protection rule (if any)
+  required a green run at merge time — it doesn't show the run history or
+  distinguish "always green" from "failed, then fixed." Queried
+  `GET /repos/.../actions/runs` directly against the real repository this
+  session and read the exact `run_number`/`head_sha`/`conclusion` fields
+  rather than trusting a summary.
+- **A real hosted-only failure was caught, not just a clean run.** Commit
+  `7fdd9ec` ("ci: harden GitHub Actions workflow for hosted verification")
+  failed on GitHub's hosted runners (runs #29 push, #30 pull_request, both
+  `conclusion: failure`) — a class of failure this session's local `make ci`
+  runs cannot reproduce, since local runs share this session's already-warm
+  Docker layer cache and don't exercise `actions/checkout`, GitHub's own
+  runner image, or its network path to the container registries `make ci`
+  pulls from. Commit `375ea9e` ("fix: normalize TypeScript build metadata
+  files") fixed it — runs #31 (push) and #32 (pull_request) both
+  `conclusion: success`. The merge to `main` (`e402f37`, run #33) is also
+  green. 33 total hosted runs exist for this repository as of this session,
+  going back to Phase 5's branch, when the workflow was first authored.
+- **What this closes vs. what it doesn't**: this confirms the workflow
+  itself runs correctly end-to-end on GitHub's infrastructure — the same
+  gate this project has run locally since Phase 5. It does not add new CI
+  steps or change what the gate checks; `RISKS.md` #15 (mypy not yet CI-
+  gated) is closed by this, since `make typecheck` has been part of `make
+  ci`/this workflow since Phase 3 and is therefore now confirmed to run on
+  every hosted push/PR, not just locally.
+
 ## 2026-07-27 — Phase 11: AWS infrastructure (Terraform)
 
 Full detail: `infra/terraform/README.md`. Scope: author + validate realistic
@@ -312,7 +390,7 @@ original scope, already landed in Phase 5.
   Phase 7's own reasoning for *not* building a fake login (`RISKS.md` #25's
   original text: "building a login screen with nothing real to
   authenticate against would be exactly the kind of fabricated capability
-  CLAUDE.md forbids"). The seed step only inserts users whose email doesn't
+  this project's standing rules forbid"). The seed step only inserts users whose email doesn't
   already exist, so it's safe to run on every container start, including
   against a persistent dev volume.
 - **The ops dashboard's `AuthContext.login()` makes a second round trip to
@@ -500,7 +578,8 @@ original scope, already landed in Phase 5.
   state.** ADR 0009 designed JWT/RBAC; Phase 9 never implemented it — no
   `users` table, no login route exists anywhere in this repo yet. Building
   a login screen with nothing real to authenticate against would be
-  exactly the kind of fabricated capability `CLAUDE.md` forbids. Every
+  exactly the kind of fabricated capability this project's standing rules
+  (`CONTRIBUTING.md`) forbid. Every
   action the dashboard can take (create/cancel an order, a stock check) is
   exactly what an unauthenticated `curl` against these same endpoints
   could already do, so this adds no new privilege — named as a limitation,
@@ -897,7 +976,7 @@ original scope, already landed in Phase 5.
 - Gateway rate limiting is a simple in-process fixed-window counter (not
   Redis-backed) — correct and testable for a single-instance local demo,
   explicitly not a multi-instance-safe design; documented in the middleware
-  docstring and `docs/reliability.md` will restate it when that doc lands.
+  docstring and in `RISKS.md` #13.
 - **Real bugs found while verifying Phase 1's own test suite, fixed before
   trusting any result** (see `TEST_RESULTS.md` for the full list; recorded
   here for the *why*, since these are the kind of mistake worth remembering):
@@ -1066,7 +1145,7 @@ original scope, already landed in Phase 5.
   written without that constraint would mean either a large unrelated
   reformatting pass (out of this phase's scope) or quietly disabling rules
   until it passed (worse than not having the tool). What it does check —
-  the type hints CLAUDE.md's conventions already call for — passes clean.
+  the type hints CONTRIBUTING.md's conventions already call for — passes clean.
 - **Grafana runs with anonymous admin access** (`GF_AUTH_ANONYMOUS_ENABLED`),
   matching this project's "no paid services, single-command local demo,
   nothing here guards real data" posture (see ADR 0009's authn/authz

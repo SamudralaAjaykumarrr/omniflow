@@ -483,7 +483,7 @@ format-check:
 ## service's own `app`/`event_contracts` package (not third-party code, not
 ## Alembic's generated migration scripts). Non-strict: this codebase never
 ## adopted mypy before Phase 3, so this checks the type hints that are
-## already there (CLAUDE.md's "type hints throughout" convention) without
+## already there (CONTRIBUTING.md's "type hints throughout" convention) without
 ## retroactively demanding annotations Phase 1/2 code never had.
 ## Each service's `app` package shares the same name across services (they're
 ## separate deployables, not a shared namespace), so mypy checks each one in
