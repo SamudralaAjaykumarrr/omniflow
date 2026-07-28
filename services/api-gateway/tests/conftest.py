@@ -30,7 +30,7 @@ def _schema():
     """Schema is owned by Alembic migrations — entrypoint.sh runs `alembic
     upgrade head` before pytest ever starts. `create_all` here only backfills
     tables for the rare case pytest runs outside that entrypoint (a no-op
-    otherwise). Deliberately never `drop_all` — see CLAUDE.md / RISKS.md #12."""
+    otherwise). Deliberately never `drop_all` — see CONTRIBUTING.md / RISKS.md #12."""
     engine = get_engine()
     Base.metadata.create_all(engine)
     with engine.begin() as conn:

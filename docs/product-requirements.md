@@ -75,7 +75,7 @@ distributed system (timeouts, duplicate deliveries, partial outages).
 
 - No real payment processing, no PCI scope, no real carrier integration.
 - No multi-region/multi-cluster HA story implemented (only documented as a
-  scale-out discussion in `docs/reliability.md` and the AWS Terraform notes).
+  scale-out discussion in `RISKS.md` #13 and `infra/terraform/README.md`).
 - No mobile app, no consumer-facing storefront UI.
 - No claim of exactly-once event delivery anywhere in the system.
 - No production AWS deployment — Terraform is authored and validated, not applied.
@@ -86,5 +86,6 @@ The project is successful when: `docker compose up` (or `make demo`) brings up
 a working system on a clean machine; a scripted order flow completes end to
 end with events visible in the data pipeline; at least the ten Failure
 Laboratory scenarios are reproducible and produce documented, observable
-outcomes; and every number quoted in `docs/resume-evidence.md` was produced by
-a command actually run against this repository.
+outcomes; and every number quoted in `docs/project-evidence.md` or
+`docs/career-deliverables.md` was produced by a command actually run against
+this repository.

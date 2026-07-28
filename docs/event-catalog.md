@@ -46,8 +46,9 @@ version. New required field or changed field type bumps **minor** and requires
 a migration window where both old and new consumers run. Removing/renaming a
 field is a **major** bump and requires a new topic version
 (`order.created.v2`) rather than breaking the existing one in place. Contract
-tests (`docs/testing-strategy.md`) assert that a producer's current payload
-still validates against the last two published schema versions.
+tests (`services/event-contracts/tests/`, results in `TEST_RESULTS.md`)
+assert that a producer's current payload still validates against the last
+two published schema versions.
 
 ## Events
 

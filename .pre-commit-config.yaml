@@ -1,5 +1,5 @@
 # Run via `make pre-commit` (a throwaway container — no host Python
-# toolchain assumed, see CLAUDE.md). Deliberately does NOT include mypy or
+# toolchain assumed, see CONTRIBUTING.md). Deliberately does NOT include mypy or
 # the per-service test suites: those need each service's runtime deps
 # (FastAPI, SQLAlchemy, PySpark, ...) and a live Postgres, which is a much
 # heavier ask than a pre-commit hook should make on every run — they stay as

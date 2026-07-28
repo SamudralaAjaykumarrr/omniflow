@@ -56,7 +56,7 @@ Internet
 
 - Docker (for running Terraform via the official image — no host Terraform
   install, matching this repo's "no host toolchain" convention, see
-  `CLAUDE.md`).
+  `CONTRIBUTING.md`).
 - Nothing else. No AWS CLI, no AWS credentials, no AWS account is needed to
   run any of the validation commands below.
 

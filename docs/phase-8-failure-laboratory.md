@@ -465,8 +465,8 @@ repeatedly, during a demo):
 | downstream-outage | Force-disables the simulated outage (safety valve if a run was interrupted) |
 
 None of the 10 scenarios ever drop, truncate, or otherwise destructively
-modify a table it doesn't own — consistent with `CLAUDE.md`'s standing
-rule. `failure_lab_dead_letters` and `scenario_runs`/`scenario_resets`
+modify a table it doesn't own — consistent with `CONTRIBUTING.md`'s
+standing rule. `failure_lab_dead_letters` and `scenario_runs`/`scenario_resets`
 (this service's own tables) are the only things any reset ever mutates
 beyond the specific scenario's own re-seeded row.
 
